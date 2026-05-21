@@ -1,0 +1,49 @@
+{
+  "num_teams": 10,
+  "team_names": [
+    "You",
+    "Alpha Bot",
+    "Beta Bot",
+    "Gamma Bot",
+    "Delta Bot",
+    "Epsilon Bot",
+    "Zeta Bot",
+    "Eta Bot",
+    "Theta Bot",
+    "Iota Bot"
+  ],
+  "roster_settings": {
+    "QB": 1,
+    "RB": 2,
+    "WR": 2,
+    "TE": 1,
+    "FLEX": 1,
+    "K": 1,
+    "DEF": 1,
+    "BENCH": 6
+  },
+  "scoring": {
+    "passing": {
+      "yards": 0.04,
+      "touchdowns": 4.0,
+      "interceptions": -2.0,
+      "two_point_conversions": 2.0
+    },
+    "rushing": {
+      "yards": 0.1,
+      "touchdowns": 6.0,
+      "two_point_conversions": 2.0
+    },
+    "receiving": {
+      "yards": 0.1,
+      "touchdowns": 6.0,
+      "receptions": 1.0,
+      "two_point_conversions": 2.0
+    },
+    "misc": {
+      "fumbles_lost": -2.0
+    }
+  },
+  "ai_policies": ["best_available", "scarcity", "balanced"],
+  "draft_objective": "roto"
+}
