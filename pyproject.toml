@@ -20,7 +20,7 @@ dev = [
 ]
 [project.scripts]
 fflab = "fflab.cli:main"
-fflab-gui = "fflab.web:main"
+fflab-gui = "fflab.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

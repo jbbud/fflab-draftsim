@@ -508,13 +508,25 @@
     const roster = rosters[teamIndex] || [];
     const counts = rosterCounts(roster);
     const starters = integer(state.session.roster_settings?.[position], 0);
-    if (counts[position] < starters) return 2;
+
+    const openStarterSlots = Math.max(starters - integer(counts[position], 0), 0);
+
+    let flexValue = 0;
     if (flexPositions.has(position)) {
-      const base = ["RB", "WR", "TE"].reduce((sum, pos) => sum + integer(state.session.roster_settings?.[pos], 0), 0);
-      const drafted = ["RB", "WR", "TE"].reduce((sum, pos) => sum + integer(counts[pos], 0), 0);
-      if (drafted < base + integer(state.session.roster_settings?.FLEX, 0)) return 1;
+      const base = ["RB", "WR", "TE"].reduce(
+        (sum, pos) => sum + integer(state.session.roster_settings?.[pos], 0),
+        0
+      );
+      const drafted = ["RB", "WR", "TE"].reduce(
+        (sum, pos) => sum + integer(counts[pos], 0),
+        0
+      );
+      const flexCapacity = integer(state.session.roster_settings?.FLEX, 0);
+      if (drafted < base + flexCapacity) {
+        flexValue = 0.5;
+      }
     }
-    return 0;
+    return openStarterSlots + flexValue;
   }
 
   function undraftedPlayers() {
@@ -544,18 +556,18 @@
     const candidates = draftablePlayersForCurrentPick();
     if (candidates.length === 0) return null;
     const startRounds = state.session.position_start_rounds || {};
-    const nonPenalized = candidates.filter((player) => {
-      const start = integer(startRounds[player.position], 1);
-      return pick.round >= start || needTier(teamIndex, player.position, rosters) >= 2;
-    });
-    const pool = nonPenalized.length > 0 ? nonPenalized : candidates;
-    return pool
+    // const nonPenalized = candidates.filter((player) => {
+    //   const start = integer(startRounds[player.position], 1);
+    //   return pick.round >= start || needTier(teamIndex, player.position, rosters) >= 2;
+    // });
+    // const pool = nonPenalized.length > 0 ? nonPenalized : candidates;
+    return candidates
       .map((player) => {
         const need = needTier(teamIndex, player.position, rosters);
-        const earlyPenalty = pick.round < integer(startRounds[player.position], 1) ? 75 : 0;
+        const earlyPenalty = pick.round < integer(startRounds[player.position], 1) ? 45 : 0;
         const counts = rosterCounts(rosters[teamIndex] || []);
-        const benchPenalty = Math.max((counts[player.position] || 0) - integer(state.session.roster_settings?.[player.position], 0), 0) * 8;
-        const score = number(player.projected_total_pts) + need * 38 + scarcityBonus(player) - earlyPenalty - benchPenalty;
+        const benchPenalty = Math.max(1+(counts[player.position] || 0) - integer(state.session.roster_settings?.[player.position], 0), 0) * 40;
+        const score = number(player.projected_total_pts) + need * 25 + scarcityBonus(player) - earlyPenalty - benchPenalty;
         return { player, score };
       })
       .sort((a, b) => b.score - a.score)[0].player;
