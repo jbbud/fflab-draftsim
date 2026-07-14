@@ -39,7 +39,8 @@ def get_optimal_weekly_lineup(
     players_by_id = players_by_id.set_index("player_id", drop=False)
     week_scores = weekly_scores[weekly_scores["week"].eq(week)].copy()
     week_scores["player_id"] = week_scores["player_id"].astype(str)
-    score_by_id = week_scores.groupby("player_id")["points_scored"].sum().to_dict()
+    score_column = "points_scored" if "points_scored" in week_scores.columns else "projected_points"
+    score_by_id = week_scores.groupby("player_id")[score_column].sum().to_dict()
 
     candidates: list[LineupSlot] = []
     for player_id in roster:

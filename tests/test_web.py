@@ -1,125 +1,158 @@
 from __future__ import annotations
 
-import pandas as pd
-import pytest
+from pathlib import Path
 
-from fflab.config import LeagueConfig
-from fflab.scoring import ScoredData
-from fflab.web import (
-    SESSIONS,
-    create_draft_session,
-    is_human_team,
-    lineup_payload,
-    make_human_pick,
-    session_state_payload,
-)
+from fflab import web
 
 
-def tiny_scored_data() -> ScoredData:
-    players = pd.DataFrame(
-        [
-            {
-                "player_id": "p1",
-                "player_name": "QB One",
-                "position": "QB",
-                "season": 2020,
-                "season_total_pts": 20,
-            },
-            {
-                "player_id": "p2",
-                "player_name": "QB Two",
-                "position": "QB",
-                "season": 2020,
-                "season_total_pts": 12,
-            },
-        ]
-    )
-    weekly = pd.DataFrame(
-        [
-            {"player_id": "p1", "week": 1, "points_scored": 20},
-            {"player_id": "p2", "week": 1, "points_scored": 12},
-        ]
-    )
-    return ScoredData(players=players, weekly_scores=weekly)
-
-
-@pytest.fixture(autouse=True)
-def clear_sessions() -> None:
-    SESSIONS.clear()
-
-
-def test_human_team_detection_uses_bot_substring() -> None:
-    assert is_human_team("You")
-    assert is_human_team("Jordan")
-    assert not is_human_team("Alpha Bot")
-    assert not is_human_team("robot manager")
-
-
-def test_starting_draft_auto_advances_bot_and_stops_on_human_pick() -> None:
-    config = LeagueConfig(
-        num_teams=2,
-        team_names=["Alpha Bot", "You"],
-        roster_settings={"QB": 1},
-    )
-    session = create_draft_session(tiny_scored_data(), config, season=2020)
-    payload = session_state_payload(session.id)
-
-    assert payload["complete"] is False
-    assert payload["currentPick"]["team"] == "You"
-    assert payload["currentPick"]["human"] is True
-    assert payload["picks"][0]["team"] == "Alpha Bot"
-    assert payload["picks"][0]["player_id"] == "p1"
-    assert payload["availablePlayers"][0]["player_id"] == "p2"
-
-
-def test_human_pick_rejects_unavailable_player() -> None:
-    config = LeagueConfig(
-        num_teams=2,
-        team_names=["Alpha Bot", "You"],
-        roster_settings={"QB": 1},
-    )
-    session = create_draft_session(tiny_scored_data(), config, season=2020)
-
-    with pytest.raises(ValueError, match="unavailable"):
-        make_human_pick(session.id, "p1")
-
-
-def test_human_pick_can_complete_draft_and_store_results() -> None:
-    config = LeagueConfig(
-        num_teams=2,
-        team_names=["Alpha Bot", "You"],
-        roster_settings={"QB": 1},
-    )
-    session = create_draft_session(tiny_scored_data(), config, season=2020)
-    payload = make_human_pick(session.id, "p2")
-
-    assert payload["complete"] is True
-    assert payload["results"] is not None
-    assert payload["results"]["roto"][0]["team"] == "Alpha Bot"
-    assert payload["results"]["standings"][0]["team"] == "Alpha Bot"
-
-
-def test_lineup_payload_returns_starters_bench_and_points() -> None:
-    config = LeagueConfig(
-        num_teams=2,
-        team_names=["Alpha Bot", "You"],
-        roster_settings={"QB": 1},
-    )
-    session = create_draft_session(tiny_scored_data(), config, season=2020)
-    make_human_pick(session.id, "p2")
-
-    lineup = lineup_payload(session.id, team_index=1, week=1)
-
-    assert lineup["team"] == "You"
-    assert lineup["week"] == 1
-    assert lineup["total_points"] == 12
-    assert lineup["starters"] == [
-        {
-            "slot": "QB",
-            "player_id": "p2",
-            "player_name": "QB Two",
-            "position": "QB",
-            "points": 12.0,
+def test_projection_sync_response_excludes_private_cookie_fields(monkeypatch) -> None:
+    def fake_sync(payload):
+        assert payload["espn_s2"] == "secret"
+        return {
+            "players": [],
+            "weekly_projections": [],
+            "league_settings": {},
+            "team_names": [],
+            "synced_at": "2026-07-14T00:00:00+00:00",
         }
-    ]
-    assert lineup["bench"] == []
+
+    monkeypatch.setattr(web, "sync_projection_payload", fake_sync)
+    response = web.projection_sync_response(
+        {"league_id": 1, "year": 2026, "espn_s2": "secret", "swid": "{abc}"}
+    )
+
+    assert response["request"] == {"league_id": 1, "year": 2026}
+    assert "espn_s2" not in response
+    assert "swid" not in response
+
+
+def test_projection_sync_response_fills_missing_credentials_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("ESPN_S2", "server-secret")
+    monkeypatch.setenv("SWID", "{server-swid}")
+
+    def fake_sync(payload):
+        assert payload["espn_s2"] == "server-secret"
+        assert payload["swid"] == "{server-swid}"
+        return {
+            "players": [],
+            "weekly_projections": [],
+            "league_settings": {},
+            "team_names": [],
+            "synced_at": "2026-07-14T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(web, "sync_projection_payload", fake_sync)
+    response = web.projection_sync_response({"league_id": 1, "year": 2026})
+
+    assert response["request"] == {"league_id": 1, "year": 2026}
+
+
+def test_load_env_file_sets_missing_values_without_overriding(tmp_path, monkeypatch) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        """
+        ESPN_S2="from-file"
+        SWID='{file-swid}'
+        ESPN_SWID={alternate}
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ESPN_S2", raising=False)
+    monkeypatch.setenv("SWID", "{existing}")
+
+    values = web.load_env_file(env_path)
+
+    assert values["ESPN_S2"] == "from-file"
+    assert values["SWID"] == "{file-swid}"
+    assert values["ESPN_SWID"] == "{alternate}"
+    assert web.os.environ["ESPN_S2"] == "from-file"
+    assert web.os.environ["SWID"] == "{existing}"
+
+
+def test_gui_config_includes_safe_env_defaults_without_credentials(monkeypatch) -> None:
+    monkeypatch.setenv("LEAGUE_ID", "987654")
+    monkeypatch.setenv("YEAR", "2026")
+    monkeypatch.setenv("WEEK_START", "1")
+    monkeypatch.setenv("WEEK_END", "17")
+    monkeypatch.setenv("ESPN_S2", "server-secret")
+    monkeypatch.setenv("SWID", "{server-swid}")
+
+    config = web.gui_config()
+
+    assert config["league_id"] == "987654"
+    assert config["year"] == 2026
+    assert config["week_start"] == 1
+    assert config["week_end"] == 17
+    assert "espn_s2" not in config
+    assert "swid" not in config
+    assert "ESPN_S2" not in config
+    assert "SWID" not in config
+
+
+def test_static_assets_include_dexie_schema_and_offline_logic() -> None:
+    app = Path("src/fflab/static/app.js").read_text(encoding="utf-8")
+    dexie = Path("src/fflab/static/dexie.min.js").read_text(encoding="utf-8")
+
+    assert 'new Dexie("fflab_draftsim")' in app
+    assert "weekly_projections" in app
+    assert "league_schedule" in app
+    assert "draft_slots" in app
+    assert "pick_trades" in app
+    assert "baseDraftSlots" in app
+    assert "bye_week" in app
+    assert "FLEX" in app
+    assert "setActiveTab" in app
+    assert "renderSelectedRoster" in app
+    assert "writeProjectionInputs" in app
+    assert "parsePickToken" in app
+    assert "testTrade" in app
+    assert "availableSort" in app
+    assert "injuryCode" in app
+    assert "adp" in app
+    assert "ADP" in app
+    assert "undraftedPlayers" in app
+    assert "draftablePlayersForCurrentPick" in app
+    assert "draft_started" in app
+    assert "startDraft" in app
+    assert "draftBusy" in app
+    assert "withDraftLock" in app
+    assert "autoPickCurrent" in app
+    assert "resumeBotDraftIfNeeded" in app
+    assert "No legal bot pick" in app
+    assert "sanitizeDraftPicks" in app
+    assert "repairDraftPicksFromDb" in app
+    assert "draftedPlayerIds" in app
+    assert "was already drafted at pick" in app
+    assert "rawWeeklyProjectionCount" in app
+    assert "boardCount" in app
+    assert "Showing ${rows.length} of ${available.length} available players" in app
+    assert "ESPN did not return raw weekly projection rows" in app
+    assert "assertPickOwnedByTeam" in app
+    assert "Pick trades must be set before the draft starts." in app
+    assert "Scheduled" in app
+    assert "simulateDraft" in app
+    assert "simulatePlayoffs" in app
+    assert "savePlayoffSettings" in app
+    assert "playoff_team_count" in app
+    assert "playoff_bye_count" in app
+    assert "points_against" in app
+    assert "PA" in app
+    assert "global.Dexie = Dexie" in dexie
+
+    assert 'data-tab="projectionTab"' in web.HTML
+    assert 'id="rosterTeam"' in web.HTML
+    assert 'id="playoffTeams"' in web.HTML
+    assert 'id="playoffByes"' in web.HTML
+    assert 'id="playoffMatchups"' in web.HTML
+    assert 'id="tradeTeamA"' in web.HTML
+    assert 'id="tradePicksA"' in web.HTML
+    assert 'id="testTrade"' in web.HTML
+    assert 'id="startDraft"' in web.HTML
+    assert 'id="boardCount"' in web.HTML
+    assert 'id="allRosters"' not in web.HTML
+
+    css = Path("src/fflab/static/style.css").read_text(encoding="utf-8")
+    assert ".sort-header" in css
+    assert ".injury-col" in css
+    assert ".clock-actions" in css
+    assert ".playoff-section" in css

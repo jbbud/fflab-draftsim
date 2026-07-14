@@ -1,4 +1,4 @@
-"""Retroactive fantasy football draft simulator."""
+"""Offline-first ESPN fantasy football draft simulator."""
 
 __all__ = ["__version__"]
 
