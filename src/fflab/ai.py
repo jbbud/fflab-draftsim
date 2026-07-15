@@ -122,14 +122,6 @@ POLICIES: dict[str, DraftPolicy] = {
 
 def get_policy(name: str) -> DraftPolicy:
     key = name.strip().lower()
-    if key.startswith("trained:"):
-        from .trainable import load_trained_policy
-
-        return load_trained_policy(name.split(":", 1)[1])
-    if key.startswith("neural:"):
-        from .neural import load_neural_policy
-
-        return load_neural_policy(name.split(":", 1)[1])
     if key not in POLICIES:
         raise ValueError(f"unknown draft policy: {name}")
     return POLICIES[key]

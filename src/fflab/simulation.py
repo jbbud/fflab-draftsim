@@ -103,6 +103,7 @@ def evaluate_matchups(
                 "ties",
                 "win_pct",
                 "points_for",
+                "points_against",
             ]
         )
     weeks = sorted(int(week) for week in weekly_team_scores["week"].unique())
@@ -119,6 +120,7 @@ def evaluate_matchups(
             "losses": 0,
             "ties": 0,
             "points_for": 0.0,
+            "points_against": 0.0,
         }
         for index in range(config.num_teams)
     }
@@ -129,6 +131,8 @@ def evaluate_matchups(
             away_score = score_lookup.get((week, away), 0.0)
             records[home]["points_for"] += home_score
             records[away]["points_for"] += away_score
+            records[home]["points_against"] += away_score
+            records[away]["points_against"] += home_score
             if home_score > away_score:
                 records[home]["wins"] += 1
                 records[away]["losses"] += 1
