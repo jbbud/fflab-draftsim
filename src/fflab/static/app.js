@@ -549,29 +549,67 @@
     return Math.max(number(player.projected_total_pts) - number(next.projected_total_pts), 0) * 0.25;
   }
 
-  function chooseBotPick(teamIndex) {
-    const pick = currentPick();
-    if (!pick) return null;
-    const rosters = rostersByTeam();
-    const candidates = draftablePlayersForCurrentPick();
-    if (candidates.length === 0) return null;
-    const startRounds = state.session.position_start_rounds || {};
-    // const nonPenalized = candidates.filter((player) => {
-    //   const start = integer(startRounds[player.position], 1);
-    //   return pick.round >= start || needTier(teamIndex, player.position, rosters) >= 2;
-    // });
-    // const pool = nonPenalized.length > 0 ? nonPenalized : candidates;
-    return candidates
-      .map((player) => {
-        const need = needTier(teamIndex, player.position, rosters);
-        const earlyPenalty = pick.round < integer(startRounds[player.position], 1) ? 45 : 0;
-        const counts = rosterCounts(rosters[teamIndex] || []);
-        const benchPenalty = Math.max(1+(counts[player.position] || 0) - integer(state.session.roster_settings?.[player.position], 0), 0) * 40;
-        const score = number(player.projected_total_pts) + need * 25 + scarcityBonus(player) - earlyPenalty - benchPenalty;
-        return { player, score };
-      })
-      .sort((a, b) => b.score - a.score)[0].player;
+
+  function weightedChoice(items, weightFn) {
+  const weights = items.map((item) => Math.max(0, weightFn(item)));
+  const total = weights.reduce((sum, w) => sum + w, 0);
+  if (total <= 0) return items[0] || null;
+
+  let roll = Math.random() * total;
+  for (let i = 0; i < items.length; i += 1) {
+    roll -= weights[i];
+    if (roll <= 0) return items[i];
   }
+  return items[items.length - 1] || null;
+}
+
+function softmaxSample(items, scoreFn, temperature = 20) {
+  const scored = items.map((item) => scoreFn(item));
+  const maxScore = Math.max(...scored);
+  const weights = scored.map((score) => Math.exp((score - maxScore) / temperature));
+  const total = weights.reduce((sum, w) => sum + w, 0);
+  let roll = Math.random() * total;
+
+  for (let i = 0; i < items.length; i += 1) {
+    roll -= weights[i];
+    if (roll <= 0) return items[i];
+  }
+  return items[items.length - 1] || null;
+}
+
+  function chooseBotPick(teamIndex) {
+  const pick = currentPick();
+  if (!pick) return null;
+
+  const rosters = rostersByTeam();
+  const candidates = draftablePlayersForCurrentPick();
+  
+  if (candidates.length === 0) return null;
+
+  const candidatePool = sortPlayers(candidates).slice(0, 40);
+
+  const startRounds = state.session.position_start_rounds || {};
+
+  const scoreFn = (player) => {
+    const need = needTier(teamIndex, player.position, rosters);
+    const earlyPenalty = pick.round < integer(startRounds[player.position], 1) ? 45 : 0;
+    const counts = rosterCounts(rosters[teamIndex] || []);
+    const benchPenalty =
+      Math.max(1 + (counts[player.position] || 0) - integer(state.session.roster_settings?.[player.position], 0), 0) * 40;
+
+    // This is your "base value"
+    return (
+      number(player.projected_total_pts)
+      + need * 25
+      + scarcityBonus(player)
+      - earlyPenalty
+      - benchPenalty
+    );
+  };
+
+  // Sample instead of argmax.
+  return softmaxSample(candidatePool, scoreFn, 18);
+}
 
   function upsertLocalDraftPick(draftPick) {
     state.picks = state.picks.filter((pick) => pick.overall !== draftPick.overall);
