@@ -11,3 +11,6 @@ dist/
 .venv/
 venv/
 models/
+.env
+.env.*
+!.env.example
