@@ -357,15 +357,22 @@ class GuiHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        try:
-            parsed = urlparse(self.path)
-            payload = self._read_json()
-            if parsed.path == "/api/projections/sync":
-                self._send_json(projection_sync_response(payload))
-                return
-            self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
-        except Exception as exc:  # noqa: BLE001
-            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+      try:
+          parsed = urlparse(self.path)
+          payload = self._read_json()
+
+          if parsed.path == "/api/projections/sync":
+              self._send_json(projection_sync_response(payload))
+              return
+
+          if parsed.path == "/api/log":
+              print(f"[browser] {payload.get('label', 'log')}: {payload}")
+              self._send_json({"ok": True})
+              return
+
+          self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+      except Exception as exc:  # noqa: BLE001
+          self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))

@@ -25,6 +25,7 @@
     results: null,
     draftBusy: false,
     availableSort: { key: "default", direction: "asc" },
+    replacementBaselineByPosition: {},
   };
 
   const $ = (id) => document.getElementById(id);
@@ -269,6 +270,7 @@
     const repairedPicks = await repairDraftPicksFromDb();
     state.picks = repairedPicks.picks;
     state.results = simulateDraft();
+    state.replacementBaselineByPosition = replacementPointsByPosition(state.players);
     writeProjectionInputs();
     writeSetupInputs();
     render();
@@ -511,20 +513,26 @@
 
     const openStarterSlots = Math.max(starters - integer(counts[position], 0), 0);
 
+    const flexCapacity = integer(state.session.roster_settings?.FLEX, 0);
+    const flexWeightByPosition = {
+      RB: 1,
+      WR: 1,
+      TE: 0.1,
+    };
+
+    const flexWeight = flexWeightByPosition[position] || 0;
     let flexValue = 0;
-    if (flexPositions.has(position)) {
-      const base = ["RB", "WR", "TE"].reduce(
-        (sum, pos) => sum + integer(state.session.roster_settings?.[pos], 0),
-        0
-      );
-      const drafted = ["RB", "WR", "TE"].reduce(
-        (sum, pos) => sum + integer(counts[pos], 0),
-        0
-      );
-      const flexCapacity = integer(state.session.roster_settings?.FLEX, 0);
-      if (drafted < base + flexCapacity) {
-        flexValue = 0.5;
-      }
+
+    if(flexWeight > 0 && flexCapacity > 0) {
+      const eligiblePositions = ["RB", "WR", "TE"];
+      const eligibleStarters = eligiblePositions.reduce((sum, pos) => sum + integer(state.session.roster_settings?.[pos], 0), 0);
+
+      const eligibleDrafted = eligiblePositions.reduce((sum, pos) => sum + integer(counts[pos], 0), 0);
+
+      const flexUsed = Math.max(eligibleDrafted - eligibleStarters, 0);
+      const flexOpen = Math.max(flexCapacity - flexUsed, 0);
+
+      flexValue = flexOpen * flexWeight;
     }
     return openStarterSlots + flexValue;
   }
@@ -549,25 +557,188 @@
     return Math.max(number(player.projected_total_pts) - number(next.projected_total_pts), 0) * 0.25;
   }
 
-
-  function weightedChoice(items, weightFn) {
-  const weights = items.map((item) => Math.max(0, weightFn(item)));
-  const total = weights.reduce((sum, w) => sum + w, 0);
-  if (total <= 0) return items[0] || null;
-
-  let roll = Math.random() * total;
-  for (let i = 0; i < items.length; i += 1) {
-    roll -= weights[i];
-    if (roll <= 0) return items[i];
+  function positionSortedPlayers(players, position) {
+    return players
+    .filter((p) => p.position === position)
+    .sort((a, b) => number(b.projected_total_pts) - number(a.projected_total_pts));
   }
-  return items[items.length - 1] || null;
+
+  function replacementPointsByPosition(players) {
+    const out = {};
+    const positions = [...new Set(players.map((p) => p.position))];
+
+    for (const position of positions) {
+      const sorted = positionSortedPlayers(players, position);
+      if (sorted.length === 0) {
+        out[position] = 0;
+        continue;
+      }
+      //total starters is the number of starters across ALL teams for this position, e.g. 10 teams with 2 RB starters = 20 total starters
+      const starters = integer(state.session.roster_settings?.[position], 0) * integer(state.session.num_teams, 0);
+
+      // Simple approximation:
+      // - the more required starters, the higher the replacement baseline
+      // - flex positions get a little extra replacement pressure
+      const flexShare = flexPositions.has(position)
+        ? integer(state.session.roster_settings?.FLEX, 0)
+        : 0;
+
+      const replacementIndex = Math.max(Math.ceil(starters + flexShare) - 1, 0);
+      const idx = Math.min(replacementIndex, sorted.length - 1);
+
+      out[position] = number(sorted[idx]?.projected_total_pts ?? 0);
+
+      }
+
+      return out;
+    }
+
+function vorScore(player, replacementByPosition) {
+  const replacement = replacementByPosition[player.position] ?? 0;
+  return Math.max(number(player.projected_total_pts) - replacement, 0);
 }
 
-function softmaxSample(items, scoreFn, temperature = 20) {
+function dropoffScore(player, candidates, teamIndex) {
+  // drop off is the difference between this player and the player at the same position who is expected to be available at the next pick for this team.
+  // e.g. in scoring dropoff for a WR at pick 15 (#2.1), the dropoff is the difference between this WR and the WR expected to be available at pick 42 (#3.14).
+  
+  const sortedByPos = positionSortedPlayers(candidates, player.position);
+  const currentPosIdx = sortedByPos.findIndex((p) => p.player_id === player.player_id);
+  if (currentPosIdx < 0 || currentPosIdx >= sortedByPos.length - 1) return 0;
+
+  const current = currentPick();
+  const currentOverall = current?.overall ?? -1;
+
+  const nextUserPick = state.picks.find(
+    (pick) =>
+      pick.team_index === teamIndex &&
+      !isSkippedPick(pick) &&
+      pick.overall > currentOverall
+  );
+
+  if (!nextUserPick) return 0;
+
+  const overallGap = Math.max(nextUserPick.overall - currentOverall - 1, 0);
+
+  // Global board = the players most likely to be drafted before our next turn.
+  const globalBoard = sortPlayers(candidates);
+
+  // How many players at this position are likely to disappear before we pick again?
+  const expectedPosLoss = globalBoard
+    .slice(0, overallGap)
+    .filter((p) => p.position === player.position)
+    .length;
+
+  const nextPosIdx = Math.min(currentPosIdx + expectedPosLoss + 1, sortedByPos.length - 1);
+  const playerAtNextPick = sortedByPos[nextPosIdx];
+
+  if (!playerAtNextPick) return 0;
+
+  const gap = Math.max(
+    number(player.projected_total_pts) - number(playerAtNextPick.projected_total_pts),
+    0
+  );
+
+  return gap;
+}
+
+function handcuffBonus(player, roster) {
+  if (player.position !== "RB") return 0;
+
+  const team = (player.pro_team || "").toUpperCase();
+  if (!team) return 0;
+
+  // Find the top projected RB on that NFL team.
+  const teamRBs = state.players
+  .filter((p) => p.position === "RB" && p.pro_team === team)
+  .sort((a, b) => number(b.projected_total_pts) - number(a.projected_total_pts));
+
+  if (teamRBs.length < 2) return 0;
+
+  const starter = teamRBs[0];
+  const backup = teamRBs.find((p) => p.player_id === player.player_id);
+  if (!backup || starter.player_id === player.player_id) return 0;
+
+  const rosterHasStarter = roster.some((p) => p.player_id === starter.player_id);
+  if (!rosterHasStarter) return 0;
+
+  // Small bonus, larger when the starter is more valuable.
+  // e.g. if the starter is projected for 300 points and the backup for 100, the bonus is (300 - 100) * 0.075 = 15 points.
+  // e.g. Bijan proj 315.1, backup Brian Robinson proj 89.7, bonus = (315.1 - 89.7) * 0.075 = 16.9 points.
+  // thus for a team with Bijan, drafting Robinson is worth ~17 points of added value.
+  return Math.max(number(starter.projected_total_pts) - number(backup.projected_total_pts), 0) * 0.075; 
+}
+
+function stackBonus(player, roster) {
+  // Gives stack bonus for a player who has a teammate on the same NFL team in the roster so far.
+  // e.g. if you have a WR from some team, then that team's QB is more valuable to you at a value of 8 additional points.
+  // for QB + TE the bonus is 6 points, for RB + WR the bonus is 4 points.
+
+  const team = (player.pro_team || "").toUpperCase();
+  if (!team) return 0;
+
+  const sameTeamRoster = roster.filter((p) => p.pro_team === team && p.player_id !== player.player_id);
+  if (sameTeamRoster.length === 0) return 0;
+
+  let bonus = 0;
+
+  for (const mate of sameTeamRoster) {
+    const pairA = player.position;
+    const pairB = mate.position;
+
+    // QB + WR
+    if (
+      (pairA === "QB" && (pairB === "WR")) ||
+      (pairB === "QB" && (pairA === "WR"))
+    ) {
+      bonus = Math.max(bonus, 8.0);
+    }
+
+    //  QB + TE is weaker, but still useful as a minor correlation play
+    if (
+      (pairA === "QB" && pairB === "TE") ||
+      (pairB === "QB" && pairA === "TE")
+    ) {
+      bonus = Math.max(bonus, 6.0);
+    }
+
+    // RB + WR is weaker, but still useful as a minor correlation play
+    if (
+      (pairA === "RB" && pairB === "WR") ||
+      (pairA === "WR" && pairB === "RB")
+    ) {
+      bonus = Math.max(bonus, 4.0);
+    }
+
+  }
+
+  return bonus;
+}
+
+function softmaxSample(items, scoreFn, temperature = 8) {
+  // high temperature indicates more randomness, low temperature indicates more deterministic behavior.
   const scored = items.map((item) => scoreFn(item));
   const maxScore = Math.max(...scored);
   const weights = scored.map((score) => Math.exp((score - maxScore) / temperature));
   const total = weights.reduce((sum, w) => sum + w, 0);
+  if (total <= 0) return items[0] || null;
+
+  // for debug, print the scores and weights to terminal
+/*fetch("/api/log", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    label: "softmax-debug",
+    scores: scored,
+    weights: weights,
+    items: items.map((item) => ({
+      player_id: item.player_id,
+      player_name: item.player_name,
+    })),
+  }),
+}).catch(() => {});*/
+
+
   let roll = Math.random() * total;
 
   for (let i = 0; i < items.length; i += 1) {
@@ -577,38 +748,62 @@ function softmaxSample(items, scoreFn, temperature = 20) {
   return items[items.length - 1] || null;
 }
 
-  function chooseBotPick(teamIndex) {
+function chooseBotPick(teamIndex) {
   const pick = currentPick();
   if (!pick) return null;
 
   const rosters = rostersByTeam();
+  const roster = rosters[teamIndex] || [];
   const candidates = draftablePlayersForCurrentPick();
   
   if (candidates.length === 0) return null;
 
   const candidatePool = sortPlayers(candidates).slice(0, 40);
-
+  const replacementByPosition = state.replacementBaselineByPosition || replacementPointsByPosition(state.players);
   const startRounds = state.session.position_start_rounds || {};
 
   const scoreFn = (player) => {
     const need = needTier(teamIndex, player.position, rosters);
-    const earlyPenalty = pick.round < integer(startRounds[player.position], 1) ? 45 : 0;
-    const counts = rosterCounts(rosters[teamIndex] || []);
-    const benchPenalty =
-      Math.max(1 + (counts[player.position] || 0) - integer(state.session.roster_settings?.[player.position], 0), 0) * 40;
+    // const earlyPenalty = pick.round < integer(startRounds[player.position], 1) ? 45 : 0;
+    const counts = rosterCounts(roster);
+    //const benchPenalty =
+    //  Math.max(1 + (counts[player.position] || 0) - integer(state.session.roster_settings?.[player.position], 0), 0) * 40;
+    const vor = vorScore(player, replacementByPosition);
+    const dropoff = dropoffScore(player, candidates, teamIndex);
+    const handcuff = handcuffBonus(player, roster);
+    const stack = stackBonus(player, roster);
+    /*fetch("/api/log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        label: "softmax-debug",
+        player_name: player.player_name,
+        vor: vor,
+        need: need,
+        dropoff: dropoff,
+        handcuff: handcuff,
+        stack: stack,
+        rank: player.rank,
+        adp: player.adp,
+      }),
+    }).catch(() => {});*/
 
-    // This is your "base value"
     return (
-      number(player.projected_total_pts)
-      + need * 25
-      + scarcityBonus(player)
-      - earlyPenalty
-      - benchPenalty
+      vor * 1.25 +
+      need * 20 +
+      dropoff * 0.6 +
+      handcuff +
+      stack -
+      // earlyPenalty -
+      //benchPenalty -
+      player.rank * 0.01 - // better rank means less penalty for this --> same thing as lower rank means more penalty, which is what we want
+      // i.e. we want to have value associated with the ESPN's rank
+      (player.adp ? player.adp * 0.01 : 0) // better ADP means less penalty for this, same as above
     );
   };
 
   // Sample instead of argmax.
-  return softmaxSample(candidatePool, scoreFn, 18);
+  return softmaxSample(candidatePool, scoreFn);
 }
 
   function upsertLocalDraftPick(draftPick) {
