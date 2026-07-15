@@ -22,28 +22,19 @@
     "DEF": 1,
     "BENCH": 6
   },
-  "scoring": {
-    "passing": {
-      "yards": 0.04,
-      "touchdowns": 4.0,
-      "interceptions": -2.0,
-      "two_point_conversions": 2.0
-    },
-    "rushing": {
-      "yards": 0.1,
-      "touchdowns": 6.0,
-      "two_point_conversions": 2.0
-    },
-    "receiving": {
-      "yards": 0.1,
-      "touchdowns": 6.0,
-      "receptions": 1.0,
-      "two_point_conversions": 2.0
-    },
-    "misc": {
-      "fumbles_lost": -2.0
-    }
+  "max_extra_per_position": {
+    "QB": 1,
+    "RB": 4,
+    "WR": 4,
+    "TE": 1,
+    "K": 0,
+    "DEF": 0
   },
-  "ai_policies": ["best_available", "scarcity", "balanced"],
-  "draft_objective": "roto"
+  "position_start_rounds": {
+    "QB": 6,
+    "TE": 5,
+    "DEF": 14,
+    "K": 15
+  },
+  "human_team_index": 0
 }

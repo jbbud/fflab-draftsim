@@ -31,6 +31,7 @@ def test_matchup_standings_sort_by_win_pct_then_points() -> None:
     assert standings.iloc[0]["team"] == "Team 1"
     assert standings.iloc[0]["wins"] == 1
     assert standings.iloc[0]["ties"] == 1
+    assert standings.iloc[0]["points_against"] == 17.0
 
 
 def test_simulate_season_roto_totals() -> None:

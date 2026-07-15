@@ -5,32 +5,28 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fflab"
 version = "0.1.0"
-description = "Retroactive fantasy football drafting and simulation engine."
+description = "Offline-first ESPN fantasy football draft simulator."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "nflreadpy>=0.1.5",
-    "numpy>=1.26",
-    "polars>=1.0",
+    "espn_api>=0.46.0",
     "pandas>=2.0",
     "pydantic>=2.0",
-    "rich>=13.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
 ]
-train = [
-    "torch>=2.0",
-]
-
 [project.scripts]
 fflab = "fflab.cli:main"
-fflab-gui = "fflab.web:main"
+fflab-gui = "fflab.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+fflab = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

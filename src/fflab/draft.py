@@ -45,6 +45,10 @@ class DraftState:
         self.weekly_scores = weekly_scores.copy() if weekly_scores is not None else None
         self.players["player_id"] = self.players["player_id"].astype(str)
         self.players["position"] = self.players["position"].astype(str).str.upper()
+        if "season_total_pts" not in self.players.columns:
+            self.players["season_total_pts"] = self.players.get("projected_total_pts", 0.0)
+        if "projected_total_pts" not in self.players.columns:
+            self.players["projected_total_pts"] = self.players["season_total_pts"]
         self.players = self.players[
             self.players["position"].isin(config.draftable_positions)
         ].copy()
