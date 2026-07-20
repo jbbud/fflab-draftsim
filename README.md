@@ -1,21 +1,23 @@
 # fflab Draft Simulator
 
-`fflab_draftsim` is an offline-first ESPN fantasy football draft simulator. It runs a small local Python server for ESPN sync, then the browser stores the draft room state in IndexedDB using a vendored Dexie-compatible bundle.
+`fflab` is an offline-first ESPN fantasy football draft simulator. It hosts a small Python web app, syncs ESPN projection and league data when requested, then keeps the draft room state in browser IndexedDB through a vendored Dexie-compatible bundle.
 
-The goal is a free local Draft Dominator-style workflow: sync ESPN projections once, draft against bot teams, model pick trades, and review projected standings, weekly matchups, and mock playoffs.
+The app is built for a local Draft Dominator-style workflow: sync a league, tune bot behavior, model pick trades, draft against bots, and review projected rosters, standings, weekly matchups, and playoffs.
 
 ## Current Features
 
 - ESPN projection sync through `cwendt94/espn-api`.
 - Private league support through `ESPN_S2` and `SWID` cookies.
-- Offline browser cache for players, weekly projections, league schedule, draft slots, saved trades, draft picks, and session settings.
-- Draft board with sortable columns for rank, name, position, NFL team, bye, projected points, position rank, ADP, injury status, and ownership.
-- Position filter including `FLEX`.
-- Defenses, kickers, and offensive players.
-- Start Draft button so bots do not draft before you are ready.
-- Bot drafting with configurable QB, TE, DEF, and K timing.
-- Draft-pick trade testing and saving before the draft starts.
-- ESPN league matchup schedule when available, with generated round robin fallback.
+- Hosted UI through either `run_gui.py` locally or `api/index.py` for serverless-style hosting.
+- Offline browser cache for players, weekly projections, league schedule, draft slots, pick trades, draft picks, and session settings.
+- Draft board with search, position filtering, sortable columns, ADP, ownership, injury status, and dense local board ranks.
+- Synced ESPN league team names, with `Team #X` fallback names when sync data is missing.
+- ESPN draft slots when available, with a generated snake draft fallback.
+- Pick trade testing and saving before the draft starts.
+- Bot drafting with per-team score weights for VOR, need, dropoff, handcuff, stack, rank, and ADP.
+- Robust per-pick normalization for VOR, rank, and ADP so equal weights operate on comparable scoring units.
+- Fixed K/DEF timing delay against round 15; QB, RB, WR, and TE are not timing-discounted.
+- ESPN league matchup schedule when available, with generated round-robin fallback.
 - Projected regular-season standings with PF and PA.
 - Mock playoffs over the final three projection weeks with configurable playoff teams and first-round byes.
 - Export, import, and reset for local browser data.
@@ -23,7 +25,7 @@ The goal is a free local Draft Dominator-style workflow: sync ESPN projections o
 ## Requirements
 
 - Python 3.13 or newer.
-- Network access only when syncing ESPN data.
+- Network access only when installing dependencies or syncing ESPN data.
 - A modern browser with IndexedDB support.
 
 ## Install
@@ -34,12 +36,13 @@ From the repo root:
 python -m pip install -e .[dev]
 ```
 
-The app dependencies are listed in [pyproject.toml](pyproject.toml):
+Runtime dependency:
 
 - `espn_api`
-- `pandas`
-- `pydantic`
-- `pytest` for development/tests
+
+Development dependency:
+
+- `pytest`
 
 ## ESPN Credentials
 
@@ -66,7 +69,7 @@ WEEK_END=17
 
 Safe defaults such as `LEAGUE_ID`, `YEAR`, `WEEK_START`, and `WEEK_END` are loaded into the GUI. Credentials are used server-side for sync if the browser form leaves them blank. Cookies are not saved to IndexedDB and are not echoed in API responses.
 
-## Run The GUI
+## Run Locally
 
 ```powershell
 python run_gui.py --port 8765
@@ -81,8 +84,20 @@ http://127.0.0.1:8765
 Equivalent console script:
 
 ```powershell
-fflab gui --port 8765
+fflab-gui --port 8765
 ```
+
+## Hosting Path
+
+The active hosted app path is intentionally small:
+
+- `run_gui.py` adds `src` to `sys.path` and calls `fflab.web:main`.
+- `api/index.py` adds `src` to `sys.path` and exposes `fflab.web.GuiHandler` as `handler`.
+- `src/fflab/web.py` serves the HTML shell, static assets, `/api/projections/sync`, and `/api/log`.
+- `src/fflab/projections.py` talks to ESPN and normalizes projection, team, draft-slot, and schedule payloads.
+- `src/fflab/static/app.js` owns the browser app, IndexedDB state, bot drafting, pick trading, results, and UI rendering.
+
+Legacy CLI, optimizer, and simulation modules have been removed from the current hosting path.
 
 ## Basic Workflow
 
@@ -92,11 +107,12 @@ fflab gui --port 8765
 4. Enter `SWID` and `ESPN S2` only if they are not already in `.env`.
 5. Click `Sync ESPN`.
 6. Go to `Draft Setup`.
-7. Confirm team names, your team, bot timing, playoff teams, and first-round byes.
+7. Confirm team count, your team, playoff teams, first-round byes, and bot score weights.
 8. Add any pick trades in `Pick Trading`.
-9. Click `Start Draft`.
-10. Draft your players from the board; use `Auto Pick` to advance bot picks if needed.
-11. After the draft completes, open `Rosters` to view rosters, standings, regular matchups, and mock playoffs.
+9. Click `New Draft Board` if you changed draft structure or trades.
+10. Click `Start Draft`.
+11. Draft your players from the board; use `Auto Pick` to advance bot picks if needed.
+12. After the draft completes, open `Rosters` to view rosters, standings, regular matchups, and mock playoffs.
 
 ## Projection Sync Details
 
@@ -155,12 +171,46 @@ The `Draft Setup` tab controls:
 
 - Number of teams.
 - Your team.
-- Team names.
-- Earliest bot draft rounds for QB, TE, DEF, and K.
 - Playoff team count.
 - First-round playoff byes.
+- Per-team bot score weights.
 
-Use `New Draft Board` after changing draft structure or team names. Playoff settings can be changed after a draft and results will recalculate.
+Team names come from the synced league. If a synced name is unavailable, the app displays `Team #X`.
+
+The score-weight editor lets you pick a team and tune:
+
+- `VOR`
+- `Need`
+- `Dropoff`
+- `Handcuff`
+- `Stack`
+- `Rank`
+- `ADP`
+
+VOR, rank, and ADP are normalized per bot pick with median/IQR scaling before weights are applied. This keeps equal weights roughly comparable while still allowing elite VOR outliers to matter.
+
+Kickers and defenses are timing-discounted against round 15. QB, RB, WR, and TE do not use a position start-round discount.
+
+## Bot Scoring Notes
+
+For each bot pick, the app evaluates legal candidates for the current roster and combines:
+
+- normalized VOR
+- starter and roster need
+- positional dropoff before the team's next pick
+- handcuff and stack bonuses
+- normalized rank value
+- normalized ADP value
+- K/DEF timing discount
+
+The VOR replacement baseline scales with league size and roster settings. In a 14-team league, the default baseline is:
+
+- `QB14`
+- `RB35`
+- `WR35`
+- `TE14`
+- `K1`
+- `DEF1`
 
 ## Pick Trading
 
@@ -222,31 +272,12 @@ Use the GUI buttons:
 - `Import`: restore local data from JSON.
 - `Reset Local`: clear the browser database and return to defaults.
 
-## CLI
-
-Start the local GUI:
-
-```powershell
-fflab gui --host 127.0.0.1 --port 8765
-```
-
-Fetch ESPN projections as JSON:
-
-```powershell
-fflab sync-projections --league-id 123456 --year 2026 --week-start 1 --week-end 17
-```
-
-For a private league:
-
-```powershell
-fflab sync-projections --league-id 123456 --year 2026 --espn-s2 "..." --swid "{...}"
-```
-
 ## Tests
 
 ```powershell
-python -m pytest -q
 node --check src/fflab/static/app.js
+python -m pytest -q
+python -m compileall -q src api run_gui.py
 ```
 
 On some Windows setups, pytest may warn that it cannot write `.pytest_cache`. That warning does not mean the tests failed.
@@ -259,9 +290,14 @@ If sync fails:
 - For private leagues, refresh `ESPN_S2` and `SWID`.
 - Check that your ESPN account can open the league in a browser.
 
-If the board is missing new fields such as ADP:
+If the board is missing fields such as ADP, ownership, or injury status:
 
-- Run a fresh ESPN sync. Older IndexedDB rows did not have every newer field.
+- Run a fresh ESPN sync. Older IndexedDB rows may not have every newer field.
+
+If team names look generic:
+
+- Run a fresh ESPN sync.
+- If ESPN does not return names, the app falls back to `Team #X`.
 
 If picks, trades, or rosters look stale:
 

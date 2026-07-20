@@ -133,10 +133,36 @@ def test_static_assets_include_dexie_schema_and_offline_logic() -> None:
     assert "simulateDraft" in app
     assert "simulatePlayoffs" in app
     assert "savePlayoffSettings" in app
+    assert "score_weights_by_team" in app
+    assert "scoreWeightsForTeam" in app
+    assert "saveScoreWeightInputs" in app
+    assert "nextPickForTeam" in app
+    assert "state.slots.find" in app
+    assert "positionTimingMultiplier" in app
+    assert 'position !== "K" && position !== "DEF"' in app
+    assert "currentRound / 15" in app
+    assert "Math.pow(progress, 6)" in app
+    assert "untimedValueShare" in app
+    assert "coreShare" in app
+    assert "timingStrengthByPosition" not in app
+    assert "position_start_rounds" not in app
+    assert "robustComponentNormalizer" in app
+    assert "signedPower" in app
+    assert "migrateScoreWeightUnits" in app
+    assert "normalized-v1" in app
+    assert "rankValRaw" in app
+    assert "adpValRaw" in app
+    assert "vorVal" in app
+    assert "coreValue" in app
+    assert "timedValue" in app
     assert "playoff_team_count" in app
     assert "playoff_bye_count" in app
     assert "points_against" in app
     assert "PA" in app
+    assert "teamNamesFromSources" in app
+    assert "fallbackTeamName" in app
+    assert "Team #${index + 1}" in app
+    assert '"teamNames"' not in app
     assert "global.Dexie = Dexie" in dexie
 
     assert 'data-tab="projectionTab"' in web.HTML
@@ -149,6 +175,17 @@ def test_static_assets_include_dexie_schema_and_offline_logic() -> None:
     assert 'id="testTrade"' in web.HTML
     assert 'id="startDraft"' in web.HTML
     assert 'id="boardCount"' in web.HTML
+    assert 'id="newDraft" class="nav-action"' in web.HTML
+    assert 'id="scoreWeightTeam"' in web.HTML
+    assert 'id="saveScoreWeights"' in web.HTML
+    assert 'id="weightVor"' in web.HTML
+    assert 'id="teamNames"' not in web.HTML
+    assert "Team Names" not in web.HTML
+    assert 'id="qbStart"' not in web.HTML
+    assert 'id="teStart"' not in web.HTML
+    assert 'id="defStart"' not in web.HTML
+    assert 'id="kStart"' not in web.HTML
+    assert "position_start_rounds" not in web.HTML
     assert 'id="allRosters"' not in web.HTML
 
     css = Path("src/fflab/static/style.css").read_text(encoding="utf-8")
@@ -156,3 +193,6 @@ def test_static_assets_include_dexie_schema_and_offline_logic() -> None:
     assert ".injury-col" in css
     assert ".clock-actions" in css
     assert ".playoff-section" in css
+    assert ".weight-grid" in css
+    assert ".nav-action" in css
+    assert ".grid.four" not in css

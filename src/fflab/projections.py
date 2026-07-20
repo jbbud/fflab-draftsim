@@ -1,3 +1,5 @@
+"""Normalize ESPN fantasy data for the hosted draft simulator."""
+
 from __future__ import annotations
 
 from collections import Counter
@@ -23,6 +25,8 @@ PROJECTED_WEEKLY_STAT_FILTERS = ("11{year}", "12{year}")
 
 @dataclass(frozen=True)
 class EspnSourceConfig:
+    """Validated ESPN sync settings supplied by the browser or environment."""
+
     league_id: int
     year: int
     espn_s2: str | None = None
@@ -33,6 +37,7 @@ class EspnSourceConfig:
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> EspnSourceConfig:
+        """Create a sync config from an API payload."""
         league_id = int(payload.get("league_id") or 0)
         year = int(payload.get("year") or datetime.now(timezone.utc).year)
         if league_id <= 0:
@@ -54,11 +59,13 @@ class EspnSourceConfig:
 
 
 def _blank_to_none(value: object) -> str | None:
+    """Convert blank-ish payload fields into None."""
     text = "" if value is None else str(value).strip()
     return text or None
 
 
 def _number(value: object, default: float = 0.0) -> float:
+    """Parse a numeric value, returning a fallback on bad input."""
     try:
         if value is None:
             return default
@@ -68,6 +75,7 @@ def _number(value: object, default: float = 0.0) -> float:
 
 
 def _integer(value: object, default: int = 0) -> int:
+    """Parse an integer value, returning a fallback on bad input."""
     try:
         if value is None:
             return default
@@ -77,6 +85,7 @@ def _integer(value: object, default: int = 0) -> int:
 
 
 def normalize_position(value: object) -> str:
+    """Normalize ESPN position labels into the app's draft positions."""
     position = str(value or "").upper().strip()
     if position in {"D/ST", "DST", "DEFENSE"}:
         return "DEF"
@@ -84,12 +93,14 @@ def normalize_position(value: object) -> str:
 
 
 def _position_from_id(value: object) -> str:
+    """Map ESPN default position ids to draftable position labels."""
     if value is None:
         return ""
     return POSITION_ID_MAP.get(_integer(value, -999), "")
 
 
 def _position_from_slots(value: object) -> str:
+    """Infer a draftable position from ESPN eligible slot ids or labels."""
     if not isinstance(value, list):
         return ""
     for slot in value:
@@ -103,18 +114,21 @@ def _position_from_slots(value: object) -> str:
 
 
 def _object_value(obj: object, name: str, default: object = None) -> object:
+    """Read a field from either a dict or an object attribute."""
     if isinstance(obj, dict):
         return obj.get(name, default)
     return getattr(obj, name, default)
 
 
 def _stat_value(stat: object, name: str, default: object = None) -> object:
+    """Read a stat field from either a dict or an object attribute."""
     if isinstance(stat, dict):
         return stat.get(name, default)
     return getattr(stat, name, default)
 
 
 def _stat_projected_points(stat: object) -> float:
+    """Extract projected points from the known stat field names."""
     if stat is None:
         return 0.0
     direct = _stat_value(stat, "projected_points")
@@ -127,6 +141,7 @@ def _stat_projected_points(stat: object) -> float:
 
 
 def _stat_has_projected_points(stat: object) -> bool:
+    """Return whether a stat object carries a projected-points field."""
     if stat is None:
         return False
     for name in ("projected_points", "projectedPoints", "projected"):
@@ -136,6 +151,7 @@ def _stat_has_projected_points(stat: object) -> bool:
 
 
 def _raw_player_payload(raw: object) -> dict[str, Any]:
+    """Return the nested raw ESPN player dict when one is present."""
     if not isinstance(raw, dict):
         return {}
     player_pool = raw.get("playerPoolEntry")
@@ -148,6 +164,7 @@ def _raw_player_payload(raw: object) -> dict[str, Any]:
 
 
 def _raw_player_id(raw: object) -> str:
+    """Extract a player id from raw ESPN card payloads."""
     raw_player = _raw_player_payload(raw)
     player_id = raw_player.get("id") or raw_player.get("playerId")
     if not player_id and isinstance(raw, dict):
@@ -156,6 +173,7 @@ def _raw_player_id(raw: object) -> str:
 
 
 def _raw_player_stats(raw: object) -> list[dict[str, Any]]:
+    """Return valid raw stat rows from a player-card payload."""
     raw_player = _raw_player_payload(raw)
     stats = raw_player.get("stats", [])
     if not isinstance(stats, list):
@@ -164,6 +182,7 @@ def _raw_player_stats(raw: object) -> list[dict[str, Any]]:
 
 
 def _merge_raw_stats(raw: dict[str, Any], stats: list[dict[str, Any]]) -> dict[str, Any]:
+    """Merge supplemental weekly stat rows into a raw player payload."""
     if not stats:
         return raw
     raw_player = _raw_player_payload(raw)
@@ -196,6 +215,7 @@ def _merge_raw_stats(raw: dict[str, Any], stats: list[dict[str, Any]]) -> dict[s
 
 
 def _raw_projected_points(raw: object, scoring_period: int, year: int) -> float | None:
+    """Find projected points for one scoring period in raw ESPN stats."""
     candidates: list[tuple[int, float]] = []
     for stat in _raw_player_stats(raw):
         if _integer(stat.get("seasonId")) != year:
@@ -215,6 +235,7 @@ def _raw_projected_points(raw: object, scoring_period: int, year: int) -> float 
 
 
 def _raw_projection_stat_summary(raw: object, year: int, week_start: int, week_end: int) -> tuple[Counter[str], Counter[str]]:
+    """Count raw projection rows for response metadata and diagnostics."""
     counts: Counter[str] = Counter()
     split_types: Counter[str] = Counter()
     for stat in _raw_player_stats(raw):
@@ -243,6 +264,7 @@ def _raw_projection_stat_summary(raw: object, year: int, week_start: int, week_e
 
 
 def _normalized_position(player: object, raw: object | None = None) -> str:
+    """Choose the best draftable position from object and raw player data."""
     position = normalize_position(_object_value(player, "position"))
     if position in DRAFTABLE_POSITIONS:
         return position
@@ -269,6 +291,7 @@ def _normalized_position(player: object, raw: object | None = None) -> str:
 
 
 def _draft_rank_from_raw(raw: object) -> int:
+    """Extract ESPN draft rank from raw player-card rank structures."""
     if not isinstance(raw, dict):
         return 0
     candidates: list[dict[str, Any]] = []
@@ -310,6 +333,7 @@ def _draft_rank_from_raw(raw: object) -> int:
 
 
 def _draft_rank(player: object, raw: object | None = None) -> int:
+    """Extract draft rank, preferring the richer raw ESPN payload."""
     raw_rank = _draft_rank_from_raw(raw)
     if raw_rank > 0:
         return raw_rank
@@ -321,6 +345,7 @@ def _draft_rank(player: object, raw: object | None = None) -> int:
 
 
 def _pos_rank(player: object, raw: object | None = None) -> int:
+    """Extract a player position rank from object or raw payload fields."""
     for name in ("posRank", "pos_rank", "positionalRanking", "positional_rank"):
         rank = _integer(_object_value(player, name))
         if rank > 0:
@@ -343,6 +368,7 @@ def _pos_rank(player: object, raw: object | None = None) -> int:
 
 
 def _player_adp(player: object, raw: object | None = None) -> float:
+    """Extract ESPN average draft position when available."""
     for name in ("averageDraftPosition", "average_draft_position", "adp"):
         value = _number(_object_value(player, name, None), -1.0)
         if value >= 0:
@@ -358,6 +384,7 @@ def _player_adp(player: object, raw: object | None = None) -> float:
 
 
 def _player_rank_sort_key(row: dict[str, Any]) -> tuple[bool, int, float, str]:
+    """Build the stable display sort key for normalized players."""
     rank = _integer(row.get("espn_rank") or row.get("rank"))
     return (
         rank <= 0,
@@ -368,6 +395,7 @@ def _player_rank_sort_key(row: dict[str, Any]) -> tuple[bool, int, float, str]:
 
 
 def _fill_missing_position_ranks(player_rows: list[dict[str, Any]]) -> None:
+    """Assign local position ranks when ESPN did not provide them."""
     by_position: dict[str, list[dict[str, Any]]] = {}
     for row in player_rows:
         by_position.setdefault(str(row.get("position") or ""), []).append(row)
@@ -379,6 +407,7 @@ def _fill_missing_position_ranks(player_rows: list[dict[str, Any]]) -> None:
 
 
 def _assign_display_ranks(player_rows: list[dict[str, Any]]) -> None:
+    """Replace sparse ESPN ranks with dense board ranks for display."""
     for index, row in enumerate(player_rows, start=1):
         espn_rank = _integer(row.get("espn_rank") or row.get("rank"))
         row["espn_rank"] = espn_rank
@@ -386,6 +415,7 @@ def _assign_display_ranks(player_rows: list[dict[str, Any]]) -> None:
 
 
 def _infer_bye_week(player: object, raw: object | None, week_start: int, week_end: int) -> int:
+    """Infer a bye week from explicit fields or missing schedule weeks."""
     for name in ("byeWeek", "bye_week"):
         bye = _integer(_object_value(player, name))
         if bye > 0:
@@ -414,6 +444,7 @@ def _normalize_player(
     year: int,
     raw: object | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], Counter[str]]:
+    """Normalize one ESPN player and its weekly projection rows."""
     player_id = str(_object_value(player, "playerId", _object_value(player, "player_id", _object_value(player, "id", ""))))
     if not player_id:
         return None, [], Counter()
@@ -498,11 +529,13 @@ def _normalize_player(
 
 
 def _chunked(values: list[int], size: int) -> Iterable[list[int]]:
+    """Yield fixed-size batches for ESPN player-card requests."""
     for start in range(0, len(values), size):
         yield values[start : start + size]
 
 
 def _collect_player_ids(league: object) -> list[int]:
+    """Collect player ids from league maps and roster objects."""
     ids: set[int] = set()
     player_map = _object_value(league, "player_map", {}) or {}
     if isinstance(player_map, dict):
@@ -523,6 +556,7 @@ def _collect_player_ids(league: object) -> list[int]:
 
 
 def _players_from_response(response: object) -> list[object]:
+    """Normalize espn_api player_info responses into a list."""
     if response is None:
         return []
     if isinstance(response, list):
@@ -531,6 +565,7 @@ def _players_from_response(response: object) -> list[object]:
 
 
 def _pro_schedule(league: object) -> object | None:
+    """Fetch the pro schedule when espn_api exposes the private helper."""
     if not hasattr(league, "_get_all_pro_schedule"):
         return None
     try:
@@ -540,6 +575,7 @@ def _pro_schedule(league: object) -> object | None:
 
 
 def _build_player_from_raw(raw: dict[str, Any], year: int, pro_schedule: object | None) -> object:
+    """Build an espn_api Player object from raw data when possible."""
     try:
         from espn_api.football.player import Player
     except ImportError:
@@ -560,6 +596,7 @@ def _fetch_weekly_projection_stats(
     week_start: int,
     week_end: int,
 ) -> dict[str, list[dict[str, Any]]]:
+    """Fetch supplemental weekly projection rows via kona_player_info."""
     espn_request = _object_value(league, "espn_request")
     if espn_request is None or not hasattr(espn_request, "league_get"):
         return {}
@@ -601,6 +638,7 @@ def _fetch_players(
     week_start: int,
     week_end: int,
 ) -> list[tuple[object, object | None]]:
+    """Fetch player objects, preserving raw payloads when ESPN cards work."""
     players: list[tuple[object, object | None]] = []
     espn_request = _object_value(league, "espn_request")
     if espn_request is not None and hasattr(espn_request, "get_player_card"):
@@ -645,12 +683,14 @@ def _fetch_players(
 
 
 def _team_id(team: object, fallback: int) -> int:
+    """Read a team id from a number, dict, or object."""
     if isinstance(team, int):
         return team
     return _integer(_object_value(team, "team_id", _object_value(team, "id", fallback)), fallback)
 
 
 def _team_rows(league: object) -> list[dict[str, Any]]:
+    """Normalize ESPN teams into the app's team row format."""
     rows: list[dict[str, Any]] = []
     for index, team in enumerate(_object_value(league, "teams", []) or [], start=1):
         rows.append(
@@ -666,14 +706,17 @@ def _team_rows(league: object) -> list[dict[str, Any]]:
 
 
 def _pick_round(pick: dict[str, Any]) -> int:
+    """Read a round number from an ESPN draft pick dict."""
     return _integer(pick.get("roundId") or pick.get("round") or pick.get("round_num"))
 
 
 def _pick_in_round(pick: dict[str, Any]) -> int:
+    """Read a pick-in-round number from an ESPN draft pick dict."""
     return _integer(pick.get("roundPickNumber") or pick.get("round_pick") or pick.get("pick_in_round"))
 
 
 def _pick_team_id(pick: dict[str, Any], *names: str) -> int:
+    """Return the first positive team id found under the provided keys."""
     for name in names:
         team_id = _integer(pick.get(name))
         if team_id > 0:
@@ -682,6 +725,7 @@ def _pick_team_id(pick: dict[str, Any], *names: str) -> int:
 
 
 def _draft_data_candidates(league: object) -> list[dict[str, Any]]:
+    """Collect possible raw draft payloads from league and request objects."""
     candidates: list[dict[str, Any]] = []
     for name in ("draft_detail", "draft_data", "raw_draft", "raw_league_data"):
         value = _object_value(league, name)
@@ -705,6 +749,7 @@ def _draft_data_candidates(league: object) -> list[dict[str, Any]]:
 
 
 def _pick_order_from_data(data: dict[str, Any]) -> list[int]:
+    """Extract first-round draft order team ids from a raw draft payload."""
     candidate_values = [
         data.get("pickOrder"),
         data.get("draftOrder"),
@@ -730,6 +775,7 @@ def _pick_order_from_data(data: dict[str, Any]) -> list[int]:
 
 
 def _picks_from_data(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract raw pick rows from known ESPN draft payload shapes."""
     picks = data.get("draftDetail", {}).get("picks", []) if isinstance(data.get("draftDetail"), dict) else []
     if not isinstance(picks, list):
         picks = data.get("picks", [])
@@ -737,6 +783,7 @@ def _picks_from_data(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _draft_order_from_picks(picks: list[dict[str, Any]]) -> list[int]:
+    """Infer draft order from the first round of raw pick rows."""
     valid = [
         pick for pick in picks
         if _pick_round(pick) > 0 and _pick_in_round(pick) > 0 and _pick_team_id(pick, "teamId", "team_id") > 0
@@ -755,6 +802,7 @@ def _draft_order_from_picks(picks: list[dict[str, Any]]) -> list[int]:
 
 
 def _draft_slots_from_picks(picks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert raw pick rows into current/original team slot rows."""
     slots: list[dict[str, Any]] = []
     for pick in sorted(picks, key=lambda item: (_pick_round(item), _pick_in_round(item))):
         round_num = _pick_round(pick)
@@ -781,6 +829,7 @@ def _draft_slots_from_picks(picks: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def _completed_draft_order(league: object) -> list[int]:
+    """Infer draft order from completed espn_api draft pick objects."""
     draft = _object_value(league, "draft", []) or []
     picks = [
         pick for pick in draft
@@ -800,6 +849,7 @@ def _completed_draft_order(league: object) -> list[int]:
 
 
 def _ordered_teams_and_slots(league: object) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return teams in draft order plus normalized traded draft slots."""
     teams = _team_rows(league)
     if not teams:
         return [], []
@@ -871,6 +921,7 @@ def _ordered_teams_and_slots(league: object) -> tuple[list[dict[str, Any]], list
 
 
 def _schedule_week(matchup: dict[str, Any]) -> int:
+    """Read the scoring week from a raw ESPN matchup row."""
     return _integer(
         matchup.get("matchupPeriodId")
         or matchup.get("matchup_period_id")
@@ -880,6 +931,7 @@ def _schedule_week(matchup: dict[str, Any]) -> int:
 
 
 def _schedule_side_team_id(matchup: dict[str, Any], side: str) -> int:
+    """Read the home or away team id from a raw matchup row."""
     data = matchup.get(side)
     if isinstance(data, dict):
         return _integer(data.get("teamId") or data.get("team_id") or data.get("id"))
@@ -887,6 +939,7 @@ def _schedule_side_team_id(matchup: dict[str, Any], side: str) -> int:
 
 
 def _schedule_rows_from_matchup_api(league: object) -> list[dict[str, Any]]:
+    """Fetch regular-season matchups from ESPN's matchup-score view."""
     espn_request = _object_value(league, "espn_request")
     if espn_request is None or not hasattr(espn_request, "league_get"):
         return []
@@ -916,6 +969,7 @@ def _schedule_rows_from_matchup_api(league: object) -> list[dict[str, Any]]:
 
 
 def _schedule_rows_from_teams(league: object) -> list[dict[str, Any]]:
+    """Build matchup rows from espn_api team schedule attributes."""
     rows: list[dict[str, Any]] = []
     for team in _object_value(league, "teams", []) or []:
         team_id = _team_id(team, 0)
@@ -943,6 +997,7 @@ def _league_schedule(
     week_start: int,
     week_end: int,
 ) -> list[dict[str, Any]]:
+    """Normalize league schedule rows into zero-based team-index matchups."""
     team_index_by_id = {row["team_id"]: index for index, row in enumerate(teams)}
     team_name_by_id = {row["team_id"]: row["team_name"] for row in teams}
     raw_rows = _schedule_rows_from_matchup_api(league) or _schedule_rows_from_teams(league)
@@ -979,6 +1034,7 @@ def _league_schedule(
 
 
 def _league_settings(league: object, team_count: int) -> dict[str, Any]:
+    """Extract the league settings the browser needs after sync."""
     settings = _object_value(league, "settings")
     if settings is None:
         return {"team_count": team_count}
@@ -1002,6 +1058,7 @@ def normalize_espn_league(
     batch_size: int = 50,
     player_ids: list[int] | None = None,
 ) -> dict[str, Any]:
+    """Normalize an espn_api League object into the browser cache payload."""
     ids = player_ids if player_ids is not None else _collect_player_ids(league)
     players = _fetch_players(
         league,
@@ -1078,6 +1135,7 @@ def sync_projection_payload(
     payload: dict[str, Any],
     league_factory: Callable[..., object] | None = None,
 ) -> dict[str, Any]:
+    """Create an ESPN league client and return normalized projection data."""
     config = EspnSourceConfig.from_payload(payload)
     if league_factory is None:
         try:

@@ -13,19 +13,7 @@ from .projections import sync_projection_payload
 
 
 DEFAULT_GUI_CONFIG: dict[str, Any] = {
-    "num_teams": 10,
-    "team_names": [
-        "You",
-        "Alpha Bot",
-        "Beta Bot",
-        "Gamma Bot",
-        "Delta Bot",
-        "Epsilon Bot",
-        "Zeta Bot",
-        "Eta Bot",
-        "Theta Bot",
-        "Iota Bot",
-    ],
+    "num_teams": 14,
     "roster_settings": {
         "QB": 1,
         "RB": 2,
@@ -44,12 +32,16 @@ DEFAULT_GUI_CONFIG: dict[str, Any] = {
         "K": 0,
         "DEF": 0,
     },
-    "position_start_rounds": {
-        "QB": 6,
-        "TE": 5,
-        "DEF": 14,
-        "K": 15,
+    "score_weights": {
+        "vor": 100,
+        "need": 20,
+        "dropoff": 0.6,
+        "handcuff": 1,
+        "stack": 1,
+        "rank": 100,
+        "adp": 100,
     },
+    "score_weights_by_team": {},
     "playoff_team_count": 6,
     "playoff_bye_count": 2,
     "human_team_index": 0,
@@ -83,6 +75,7 @@ HTML = """<!doctype html>
       <button class="tab-button" type="button" data-tab="setupTab">Draft Setup</button>
       <button class="tab-button" type="button" data-tab="tradingTab">Pick Trading</button>
       <button class="tab-button" type="button" data-tab="rostersTab">Rosters</button>
+      <button id="newDraft" class="nav-action" type="button">New Draft Board</button>
     </nav>
     <section id="tabPanels" class="tab-panels hidden">
       <section id="projectionTab" class="tab-panel hidden">
@@ -108,18 +101,27 @@ HTML = """<!doctype html>
           <label>Teams<input id="numTeams" inputmode="numeric"></label>
           <label>Your Team<select id="humanTeam"></select></label>
         </div>
-        <label>Team Names<textarea id="teamNames" rows="5"></textarea></label>
-        <div class="grid four">
-          <label>QB<input id="qbStart" inputmode="numeric"></label>
-          <label>TE<input id="teStart" inputmode="numeric"></label>
-          <label>DEF<input id="defStart" inputmode="numeric"></label>
-          <label>K<input id="kStart" inputmode="numeric"></label>
-        </div>
         <div class="grid two">
           <label>Playoff Teams<input id="playoffTeams" inputmode="numeric"></label>
           <label>First-Round Byes<input id="playoffByes" inputmode="numeric"></label>
         </div>
-        <button id="newDraft" type="button">New Draft Board</button>
+        <section class="score-weights">
+          <h3>Bot Score Weights</h3>
+          <label class="short-field">Team<select id="scoreWeightTeam"></select></label>
+          <div class="weight-grid">
+            <label>VOR<input id="weightVor" type="number" step="0.05"></label>
+            <label>Need<input id="weightNeed" type="number" step="0.5"></label>
+            <label>Dropoff<input id="weightDropoff" type="number" step="0.05"></label>
+            <label>Handcuff<input id="weightHandcuff" type="number" step="0.25"></label>
+            <label>Stack<input id="weightStack" type="number" step="0.25"></label>
+            <label>Rank<input id="weightRank" type="number" step="0.5"></label>
+            <label>ADP<input id="weightAdp" type="number" step="0.5"></label>
+          </div>
+          <div class="grid two">
+            <button id="saveScoreWeights" type="button" class="secondary">Save Team Weights</button>
+            <button id="resetScoreWeights" type="button" class="secondary">Reset Team Weights</button>
+          </div>
+        </section>
       </section>
       <section id="tradingTab" class="tab-panel hidden">
         <h2>Pick Trade</h2>
@@ -245,6 +247,7 @@ CONTENT_TYPES = {
 
 
 def _clean_env_value(value: str) -> str:
+    """Strip whitespace and one matching quote pair from a dotenv value."""
     value = value.strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         value = value[1:-1]
@@ -252,6 +255,7 @@ def _clean_env_value(value: str) -> str:
 
 
 def load_env_file(path: Path) -> dict[str, str]:
+    """Load simple KEY=VALUE pairs into the process environment if unset."""
     if not path.exists():
         return {}
     values: dict[str, str] = {}
@@ -272,6 +276,7 @@ def load_env_file(path: Path) -> dict[str, str]:
 
 
 def load_default_env_files() -> None:
+    """Load .env files from the current directory and repository root."""
     candidates = [
         Path.cwd() / ".env",
         Path(__file__).resolve().parents[2] / ".env",
@@ -286,6 +291,7 @@ def load_default_env_files() -> None:
 
 
 def _env_value(*names: str) -> str | None:
+    """Return the first non-blank environment value for the provided names."""
     for name in names:
         value = os.environ.get(name)
         if value and value.strip():
@@ -294,6 +300,7 @@ def _env_value(*names: str) -> str | None:
 
 
 def _env_int(*names: str) -> int | None:
+    """Return the first configured environment value that parses as an int."""
     value = _env_value(*names)
     if value is None:
         return None
@@ -304,6 +311,7 @@ def _env_int(*names: str) -> int | None:
 
 
 def gui_config() -> dict[str, Any]:
+    """Build browser-safe GUI defaults from static config and environment."""
     config = dict(DEFAULT_GUI_CONFIG)
     league_id = _env_value("LEAGUE_ID", "ESPN_LEAGUE_ID", "FFLAB_LEAGUE_ID", "league_id")
     if league_id:
@@ -321,6 +329,7 @@ def gui_config() -> dict[str, Any]:
 
 
 def payload_with_env_credentials(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fill missing ESPN cookies from server environment variables."""
     resolved = dict(payload)
     if not str(resolved.get("espn_s2") or "").strip():
         espn_s2 = _env_value("ESPN_S2")
@@ -334,6 +343,7 @@ def payload_with_env_credentials(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def projection_sync_response(payload: dict[str, Any]) -> dict[str, Any]:
+    """Sync projections and return a response without echoing private cookies."""
     safe_payload = {key: value for key, value in payload.items() if key not in {"espn_s2", "swid"}}
     result = sync_projection_payload(payload_with_env_credentials(payload))
     result["request"] = safe_payload
@@ -341,9 +351,12 @@ def projection_sync_response(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 class GuiHandler(BaseHTTPRequestHandler):
+    """HTTP handler for the hosted draft simulator UI and JSON endpoints."""
+
     server_version = "fflab-gui/1.0"
 
     def do_GET(self) -> None:
+        """Serve the app shell, safe config, static assets, or a 404."""
         parsed = urlparse(self.path)
         if parsed.path in {"/", "/index.html"}:
             self._send_html(HTML.replace("__DEFAULT_CONFIG__", json.dumps(gui_config())))
@@ -357,28 +370,31 @@ class GuiHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-      try:
-          parsed = urlparse(self.path)
-          payload = self._read_json()
+        """Handle projection sync and browser log POST endpoints."""
+        try:
+            parsed = urlparse(self.path)
+            payload = self._read_json()
 
-          if parsed.path == "/api/projections/sync":
-              self._send_json(projection_sync_response(payload))
-              return
+            if parsed.path == "/api/projections/sync":
+                self._send_json(projection_sync_response(payload))
+                return
 
-          if parsed.path == "/api/log":
-              print(f"[browser] {payload.get('label', 'log')}: {payload}")
-              self._send_json({"ok": True})
-              return
+            if parsed.path == "/api/log":
+                print(f"[browser] {payload.get('label', 'log')}: {payload}")
+                self._send_json({"ok": True})
+                return
 
-          self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
-      except Exception as exc:  # noqa: BLE001
-          self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+        except Exception as exc:  # noqa: BLE001
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
 
     def _read_json(self) -> dict[str, Any]:
+        """Read the request body as a JSON object."""
         length = int(self.headers.get("Content-Length", "0"))
         return json.loads(self.rfile.read(length).decode("utf-8") or "{}")
 
     def _send_static(self, relative_path: str) -> None:
+        """Serve a whitelisted static file from the package static directory."""
         target = (STATIC_ROOT / relative_path).resolve()
         if STATIC_ROOT.resolve() not in target.parents or not target.is_file():
             self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
@@ -387,9 +403,11 @@ class GuiHandler(BaseHTTPRequestHandler):
         self._send_bytes(target.read_bytes(), content_type=content_type)
 
     def _send_html(self, body: str) -> None:
+        """Write a UTF-8 HTML response body."""
         self._send_bytes(body.encode("utf-8"), content_type="text/html; charset=utf-8")
 
     def _send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
+        """Serialize a payload as JSON with the provided HTTP status."""
         body = json.dumps(payload).encode("utf-8")
         self._send_bytes(body, content_type="application/json; charset=utf-8", status=status)
 
@@ -400,6 +418,7 @@ class GuiHandler(BaseHTTPRequestHandler):
         content_type: str,
         status: HTTPStatus = HTTPStatus.OK,
     ) -> None:
+        """Write common response headers and a raw response body."""
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -407,10 +426,12 @@ class GuiHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, format: str, *args: Any) -> None:
+        """Silence default request logging; the browser log API is explicit."""
         return
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Create the local GUI server command-line parser."""
     parser = argparse.ArgumentParser(prog="fflab-gui")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
@@ -418,6 +439,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the local threaded HTTP server until interrupted."""
     load_default_env_files()
     args = build_parser().parse_args(argv)
     server = ThreadingHTTPServer((args.host, args.port), GuiHandler)

@@ -28,10 +28,33 @@
     replacementBaselineByPosition: {},
   };
 
+  // Resolve a DOM element by id.
   const $ = (id) => document.getElementById(id);
   const positionOrder = ["QB", "RB", "WR", "TE", "K", "DEF"];
   const flexPositions = new Set(["RB", "WR", "TE"]);
+  const replacementFlexShareByPosition = { RB: 0.5, WR: 0.5, TE: 0 };
+  const scoreWeightUnitVersion = "normalized-v1";
+  const legacyVorWeightScale = 20;
+  const defaultScoreWeights = {
+    vor: number(defaultConfig.score_weights?.vor, 25),
+    need: number(defaultConfig.score_weights?.need, 20),
+    dropoff: number(defaultConfig.score_weights?.dropoff, 0.6),
+    handcuff: number(defaultConfig.score_weights?.handcuff, 1),
+    stack: number(defaultConfig.score_weights?.stack, 1),
+    rank: number(defaultConfig.score_weights?.rank, 25),
+    adp: number(defaultConfig.score_weights?.adp, 25),
+  };
+  const scoreWeightFields = [
+    { key: "vor", inputId: "weightVor" },
+    { key: "need", inputId: "weightNeed" },
+    { key: "dropoff", inputId: "weightDropoff" },
+    { key: "handcuff", inputId: "weightHandcuff" },
+    { key: "stack", inputId: "weightStack" },
+    { key: "rank", inputId: "weightRank" },
+    { key: "adp", inputId: "weightAdp" },
+  ];
 
+  // Escape dynamic text before injecting it into table or roster markup.
   function escapeHtml(value) {
     return String(value ?? "").replace(/[&<>"']/g, (char) => ({
       "&": "&amp;",
@@ -42,28 +65,34 @@
     }[char]));
   }
 
+  // Update the shared status message and error styling.
   function setStatus(message, isError = false) {
     $("status").textContent = message;
     $("status").className = isError ? "status error" : "status";
   }
 
+  // Parse finite numbers from form fields and payload values.
   function number(value, fallback = 0) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
   }
 
+  // Parse whole-number values from form fields and payload values.
   function integer(value, fallback = 0) {
     return Math.trunc(number(value, fallback));
   }
 
+  // Bound a numeric value to an inclusive range.
   function clamp(value, min, max) {
     return Math.max(min, Math.min(value, max));
   }
 
+  // Format a fantasy points value for compact display.
   function formatPoints(value) {
     return number(value).toFixed(1);
   }
 
+  // Sort players by board rank, then projected total points.
   function sortPlayers(players) {
     return players.slice().sort((a, b) => {
       const aRank = integer(a.rank);
@@ -75,6 +104,7 @@
     });
   }
 
+  // Rebuild dense display ranks while preserving ESPN rank separately.
   function normalizeBoardRanks(players) {
     let changed = false;
     sortPlayers(players).forEach((player, index) => {
@@ -92,6 +122,7 @@
     return changed;
   }
 
+  // Fill blank position ranks from the local board order.
   function fillMissingPositionRanks(players) {
     const groups = new Map();
     let changed = false;
@@ -112,6 +143,7 @@
     return changed;
   }
 
+  // Condense ESPN injury status text for the board column.
   function injuryCode(status) {
     const value = String(status || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
     if (!value || value === "ACTIVE" || value === "NORMAL") return "";
@@ -124,6 +156,7 @@
     return value.slice(0, 3);
   }
 
+  // Compare nullable numeric or string values for sortable table headers.
   function compareValues(a, b, direction = "asc") {
     const aMissing = a == null || a === "";
     const bMissing = b == null || b === "";
@@ -136,18 +169,98 @@
     return direction === "desc" ? -result : result;
   }
 
+  // Deep-clone JSON-safe app state before storing it.
   function clone(value) {
     return JSON.parse(JSON.stringify(value));
   }
 
-  function defaultTeamNames(numTeams) {
-    const configured = defaultConfig.team_names || [];
-    return Array.from({ length: numTeams }, (_, index) => configured[index] || `Team ${index + 1}`);
+  // Merge stored score weights with the global scoring defaults.
+  function normalizeScoreWeights(weights = {}) {
+    const normalized = { ...defaultScoreWeights };
+    for (const field of scoreWeightFields) {
+      normalized[field.key] = number(weights?.[field.key], defaultScoreWeights[field.key]);
+    }
+    return normalized;
   }
 
+  // Keep only per-team weight overrides that still belong to active teams.
+  function normalizeScoreWeightsByTeam(weightsByTeam = {}, numTeams = 0) {
+    const normalized = {};
+    for (let index = 0; index < numTeams; index += 1) {
+      normalized[index] = normalizeScoreWeights(weightsByTeam?.[index]);
+    }
+    return normalized;
+  }
+
+  // Convert saved raw-VOR score weights into normalized score units once.
+  function migrateScoreWeightUnits(session) {
+    if (!session || session.score_weight_units === scoreWeightUnitVersion) return { session, changed: false };
+
+    const numTeams = sessionTeamCount(session);
+    const scoreWeightsByTeam = normalizeScoreWeightsByTeam(session.score_weights_by_team || {}, numTeams);
+    for (let index = 0; index < numTeams; index += 1) {
+      const legacyWeights = session.score_weights_by_team?.[index] || {};
+      scoreWeightsByTeam[index].vor = number(legacyWeights.vor, 1.25) * legacyVorWeightScale;
+    }
+
+    return {
+      session: {
+        ...session,
+        score_weight_units: scoreWeightUnitVersion,
+        score_weights_by_team: scoreWeightsByTeam,
+      },
+      changed: true,
+    };
+  }
+
+  // Build one generated team name for missing synced league names.
+  function fallbackTeamName(index) {
+    return `Team #${index + 1}`;
+  }
+
+  // Prefer the team name fields returned by ESPN sync payloads.
+  function syncedTeamName(team) {
+    return String(team?.team_name || team?.name || team?.display_name || "").trim();
+  }
+
+  // Resolve team names from synced team records, synced name lists, then generated fallbacks.
+  function teamNamesFromSources({ teams = [], teamNames = [], numTeams = 0 } = {}) {
+    const sourceTeams = Array.isArray(teams) ? teams : [];
+    const sourceNames = Array.isArray(teamNames) ? teamNames : [];
+    return Array.from({ length: numTeams }, (_, index) => (
+      syncedTeamName(sourceTeams[index])
+      || String(sourceNames[index] || "").trim()
+      || fallbackTeamName(index)
+    ));
+  }
+
+  // Preserve synced team metadata while keeping display names and slots normalized.
+  function teamsWithResolvedNames(session, names) {
+    const sourceTeams = Array.isArray(session?.teams) ? session.teams : [];
+    return names.map((name, index) => {
+      const team = sourceTeams[index] || {};
+      return {
+        ...team,
+        team_id: team.team_id == null ? index + 1 : team.team_id,
+        team_name: name,
+        draft_slot: integer(team.draft_slot, index + 1),
+      };
+    });
+  }
+
+  // Build fallback team names when synced league names are unavailable.
+  function defaultTeamNames(numTeams) {
+    return Array.from({ length: numTeams }, (_, index) => fallbackTeamName(index));
+  }
+
+  // Create the active session object from defaults and optional sync data.
   function defaultSession(overrides = {}) {
     const numTeams = integer(overrides.num_teams ?? defaultConfig.num_teams, 10);
-    const names = overrides.team_names || defaultTeamNames(numTeams);
+    const names = teamNamesFromSources({
+      teams: overrides.teams || [],
+      teamNames: overrides.team_names || [],
+      numTeams,
+    });
     const leaguePlayoffTeams = integer(overrides.league_settings?.playoff_team_count ?? defaultConfig.playoff_team_count, Math.min(6, numTeams));
     const playoffTeams = clamp(integer(overrides.playoff_team_count ?? leaguePlayoffTeams, Math.min(6, numTeams)), 2, numTeams);
     const playoffByes = clamp(integer(overrides.playoff_bye_count ?? defaultConfig.playoff_bye_count, playoffTeams >= 6 ? 2 : 0), 0, Math.max(playoffTeams - 2, 0));
@@ -161,13 +274,17 @@
       league_settings: overrides.league_settings || {},
       num_teams: numTeams,
       team_names: names.slice(0, numTeams),
-      teams: clone(overrides.teams || []),
+      teams: teamsWithResolvedNames(overrides, names),
       draft_slots: clone(overrides.draft_slots || []),
       projection_meta: clone(overrides.projection_meta || {}),
       draft_started: Boolean(overrides.draft_started),
       roster_settings: clone(defaultConfig.roster_settings || {}),
       max_extra_per_position: clone(defaultConfig.max_extra_per_position || {}),
-      position_start_rounds: clone(defaultConfig.position_start_rounds || {}),
+      score_weight_units: scoreWeightUnitVersion,
+      score_weights_by_team: normalizeScoreWeightsByTeam(
+        overrides.score_weights_by_team || defaultConfig.score_weights_by_team || {},
+        numTeams
+      ),
       playoff_team_count: playoffTeams,
       playoff_bye_count: playoffByes,
       human_team_index: integer(overrides.human_team_index ?? defaultConfig.human_team_index, 0),
@@ -175,11 +292,32 @@
     };
   }
 
+  // Normalize loaded sessions so team names only come from sync data or fallbacks.
+  function normalizeSessionTeamNames(session) {
+    const sourceSession = session || defaultSession();
+    const numTeams = sessionTeamCount(sourceSession);
+    const useSyncedNames = sourceSession.source !== "empty";
+    const names = teamNamesFromSources({
+      teams: useSyncedNames ? sourceSession.teams || [] : [],
+      teamNames: useSyncedNames ? sourceSession.team_names || [] : [],
+      numTeams,
+    });
+    return {
+      ...sourceSession,
+      num_teams: numTeams,
+      team_names: names,
+      teams: teamsWithResolvedNames(useSyncedNames ? sourceSession : { teams: [] }, names),
+      human_team_index: clamp(integer(sourceSession.human_team_index, 0), 0, Math.max(numTeams - 1, 0)),
+    };
+  }
+
+  // Count draft rounds from roster settings.
   function totalRosterSlots(session = state.session) {
     const settings = session?.roster_settings || {};
     return Object.values(settings).reduce((sum, value) => sum + integer(value), 0);
   }
 
+  // Render a table with optional custom cell renderers and sort headers.
   function renderTable(id, rows, columns) {
     const table = $(id);
     if (!rows || rows.length === 0) {
@@ -205,14 +343,17 @@
     table.innerHTML = head + body;
   }
 
+  // Clear a set of IndexedDB tables.
   async function clearTables(tableNames) {
     for (const name of tableNames) await db.table(name).clear();
   }
 
+  // Identify synthetic skipped picks used when no legal bot pick exists.
   function isSkippedPick(pick) {
     return Boolean(pick?.skipped || String(pick?.player_id || "").startsWith("__skip_"));
   }
 
+  // Return player ids already drafted by non-skipped picks.
   function draftedPlayerIds(picks = state.picks) {
     const drafted = new Set();
     for (const pick of picks) {
@@ -222,6 +363,7 @@
     return drafted;
   }
 
+  // Remove duplicate or malformed draft picks from a persisted pick list.
   function sanitizeDraftPicks(picks) {
     const clean = [];
     const removed = [];
@@ -246,6 +388,7 @@
     return { clean, removed };
   }
 
+  // Repair persisted draft picks before putting them into app state.
   async function repairDraftPicksFromDb() {
     const rows = await db.draft_picks.toArray();
     const { clean, removed } = sanitizeDraftPicks(rows);
@@ -256,9 +399,15 @@
     return { picks: clean, removed };
   }
 
+  // Load all browser-persisted state and render the draft room.
   async function loadState() {
     await db.open();
-    state.session = await db.sessions.get("active") || defaultSession();
+    const storedSession = await db.sessions.get("active") || defaultSession();
+    state.session = normalizeSessionTeamNames(storedSession);
+    const teamNameMigrationChanged = JSON.stringify(storedSession) !== JSON.stringify(state.session);
+    const weightMigration = migrateScoreWeightUnits(state.session);
+    state.session = weightMigration.session;
+    if (weightMigration.changed || teamNameMigrationChanged) await saveSession(state.session);
     const players = await db.players.toArray();
     const ranksChanged = normalizeBoardRanks(players);
     if (fillMissingPositionRanks(players) || ranksChanged) await db.players.bulkPut(players);
@@ -280,60 +429,110 @@
     await resumeBotDraftIfNeeded();
   }
 
+  // Persist the active session and keep memory in sync with IndexedDB.
   async function saveSession(session = state.session) {
-    state.session = session;
-    await db.sessions.put(session);
+    state.session = normalizeSessionTeamNames(session);
+    await db.sessions.put(state.session);
   }
 
+  // Return the team currently selected in the score-weight editor.
+  function selectedScoreWeightTeamIndex() {
+    const fallback = integer(state.session?.human_team_index, 0);
+    return clamp(integer($("scoreWeightTeam").value, fallback), 0, Math.max(integer(state.session?.num_teams, 1) - 1, 0));
+  }
+
+  // Return scoring weights for one team from the active session.
+  function scoreWeightsForTeam(teamIndex, session = state.session) {
+    return normalizeScoreWeights(session?.score_weights_by_team?.[teamIndex]);
+  }
+
+  // Read the score-weight editor controls into a normalized weight object.
+  function readScoreWeightInputs() {
+    const weights = {};
+    for (const field of scoreWeightFields) {
+      weights[field.key] = number($(field.inputId).value, defaultScoreWeights[field.key]);
+    }
+    return normalizeScoreWeights(weights);
+  }
+
+  // Write one team's stored scoring weights into the editor controls.
+  function writeScoreWeightInputs() {
+    const teamIndex = selectedScoreWeightTeamIndex();
+    const weights = scoreWeightsForTeam(teamIndex);
+    for (const field of scoreWeightFields) {
+      $(field.inputId).value = weights[field.key];
+    }
+  }
+
+  // Persist the current score-weight editor values for the selected team.
+  async function saveScoreWeightInputs({ announce = true } = {}) {
+    const teamIndex = selectedScoreWeightTeamIndex();
+    const scoreWeightsByTeam = normalizeScoreWeightsByTeam(
+      state.session?.score_weights_by_team || {},
+      integer(state.session?.num_teams, 0)
+    );
+    scoreWeightsByTeam[teamIndex] = readScoreWeightInputs();
+    await saveSession({ ...state.session, score_weights_by_team: scoreWeightsByTeam });
+    if (announce) setStatus(`Saved score weights for ${teamName(teamIndex)}.`);
+  }
+
+  // Restore default scoring weights for the selected team.
+  async function resetScoreWeightInputs() {
+    const teamIndex = selectedScoreWeightTeamIndex();
+    const scoreWeightsByTeam = normalizeScoreWeightsByTeam(
+      state.session?.score_weights_by_team || {},
+      integer(state.session?.num_teams, 0)
+    );
+    scoreWeightsByTeam[teamIndex] = normalizeScoreWeights();
+    await saveSession({ ...state.session, score_weights_by_team: scoreWeightsByTeam });
+    writeScoreWeightInputs();
+    setStatus(`Reset score weights for ${teamName(teamIndex)}.`);
+  }
+
+  // Read draft setup controls into a normalized session object.
   function readSetupInputs() {
     const numTeams = Math.max(integer($("numTeams").value, state.session.num_teams), 2);
     const previousNumTeams = integer(state.session?.num_teams, numTeams);
     const playoffTeams = clamp(integer($("playoffTeams").value, state.session.playoff_team_count || Math.min(6, numTeams)), 2, numTeams);
     const playoffByes = clamp(integer($("playoffByes").value, state.session.playoff_bye_count || 0), 0, Math.max(playoffTeams - 2, 0));
-    const names = $("teamNames").value
-      .split(/\r?\n/)
-      .map((value) => value.trim())
-      .filter(Boolean)
-      .slice(0, numTeams);
-    while (names.length < numTeams) names.push(`Team ${names.length + 1}`);
-    const teams = names.map((name, index) => ({
-      ...(state.session.teams?.[index] || {}),
-      team_name: name,
-      draft_slot: index + 1,
-    }));
+    const names = teamNamesFromSources({
+      teams: state.session.teams || [],
+      teamNames: state.session.team_names || [],
+      numTeams,
+    });
+    const teams = teamsWithResolvedNames(state.session, names);
     return {
       ...state.session,
       num_teams: numTeams,
       team_names: names,
       teams,
       draft_slots: previousNumTeams === numTeams ? clone(state.session.draft_slots || []) : [],
+      score_weights_by_team: normalizeScoreWeightsByTeam(
+        {
+          ...(state.session.score_weights_by_team || {}),
+          [selectedScoreWeightTeamIndex()]: readScoreWeightInputs(),
+        },
+        numTeams
+      ),
       human_team_index: Math.max(Math.min(integer($("humanTeam").value, state.session.human_team_index), numTeams - 1), 0),
-      position_start_rounds: {
-        QB: Math.max(integer($("qbStart").value, 6), 1),
-        TE: Math.max(integer($("teStart").value, 5), 1),
-        DEF: Math.max(integer($("defStart").value, 14), 1),
-        K: Math.max(integer($("kStart").value, 15), 1),
-      },
       playoff_team_count: playoffTeams,
       playoff_bye_count: playoffByes,
     };
   }
 
+  // Write the active session into the setup form controls.
   function writeSetupInputs() {
     const session = state.session || defaultSession();
     $("numTeams").value = session.num_teams;
-    $("teamNames").value = (session.team_names || defaultTeamNames(session.num_teams)).join("\n");
-    $("qbStart").value = session.position_start_rounds?.QB || 6;
-    $("teStart").value = session.position_start_rounds?.TE || 5;
-    $("defStart").value = session.position_start_rounds?.DEF || Math.max(totalRosterSlots(session) - 1, 1);
-    $("kStart").value = session.position_start_rounds?.K || totalRosterSlots(session);
     const playoffTeams = clamp(integer(session.playoff_team_count, Math.min(6, session.num_teams)), 2, session.num_teams);
     $("playoffTeams").value = playoffTeams;
     $("playoffByes").value = clamp(integer(session.playoff_bye_count, 0), 0, Math.max(playoffTeams - 2, 0));
     refreshTradeTeamOptions();
     $("humanTeam").value = String(integer(session.human_team_index, 0));
+    writeScoreWeightInputs();
   }
 
+  // Write the active projection sync settings into the sync form controls.
   function writeProjectionInputs() {
     const session = state.session || defaultSession();
     $("leagueId").value = session.league_id || defaultConfig.league_id || "";
@@ -342,24 +541,30 @@
     $("weekEnd").value = integer(session.week_end ?? defaultConfig.week_end, 17);
   }
 
+  // Refresh all team selectors after session team names change.
   function refreshTradeTeamOptions() {
     const names = state.session?.team_names || [];
     const options = names.map((name, index) => `<option value="${index}">${escapeHtml(index + 1)}. ${escapeHtml(name)}</option>`).join("");
     const tradeTeamA = $("tradeTeamA").value;
     const tradeTeamB = $("tradeTeamB").value;
     const rosterTeam = $("rosterTeam").value;
+    const scoreWeightTeam = $("scoreWeightTeam").value;
     const humanTeam = String(integer(state.session?.human_team_index, 0));
     $("tradeTeamA").innerHTML = options;
     $("tradeTeamB").innerHTML = options;
     $("humanTeam").innerHTML = options;
     $("rosterTeam").innerHTML = options;
+    $("scoreWeightTeam").innerHTML = options;
     $("tradeTeamA").value = tradeTeamA || "0";
     $("tradeTeamB").value = tradeTeamB || String(Math.min(1, Math.max(names.length - 1, 0)));
     $("humanTeam").value = humanTeam;
     $("rosterTeam").value = rosterTeam || humanTeam;
+    $("scoreWeightTeam").value = scoreWeightTeam || humanTeam;
     if ($("rosterTeam").value === "") $("rosterTeam").value = humanTeam;
+    if ($("scoreWeightTeam").value === "") $("scoreWeightTeam").value = humanTeam;
   }
 
+  // Generate a default snake draft slot list from the active roster size.
   function generateDraftSlots(session = state.session) {
     const slots = [];
     const numTeams = session.num_teams;
@@ -383,6 +588,7 @@
     return slots;
   }
 
+  // Start from synced ESPN slots when available, otherwise generated slots.
   function baseDraftSlots(session = state.session) {
     const generated = generateDraftSlots(session);
     const espnSlots = Array.isArray(session.draft_slots) ? session.draft_slots : [];
@@ -399,6 +605,7 @@
     });
   }
 
+  // Apply saved and temporary pick trades to a base slot list.
   function applyTradesToSlots(baseSlots, trades) {
     const slots = baseSlots.map((slot) => ({ ...slot }));
     const lookup = new Map(slots.map((slot) => [`${slot.round}:${slot.original_team}`, slot]));
@@ -411,6 +618,7 @@
     return slots;
   }
 
+  // Convert old and current trade shapes into uniform pick movements.
   function tradeMoves(trade) {
     if (Array.isArray(trade.team_a_pick_refs) || Array.isArray(trade.team_b_pick_refs)) {
       return [
@@ -421,6 +629,7 @@
     return (trade.pick_refs || []).map((ref) => ({ ref, from_team: trade.from_team, to_team: trade.to_team }));
   }
 
+  // Recompute draft slots from trades and optionally persist them.
   async function rebuildSlotsFromTrades({ persist = true } = {}) {
     state.slots = applyTradesToSlots(baseDraftSlots(state.session), state.trades);
     if (persist) {
@@ -430,6 +639,7 @@
     }
   }
 
+  // Reset picks and optionally trades after setup changes.
   async function resetDraftBoard({ keepTrades = false } = {}) {
     state.session = readSetupInputs();
     state.session.draft_started = false;
@@ -445,6 +655,7 @@
     await loadState();
   }
 
+  // Persist playoff settings and rerender projected results.
   async function savePlayoffSettings() {
     const playoffTeams = clamp(integer($("playoffTeams").value, state.session.playoff_team_count || Math.min(6, state.session.num_teams)), 2, state.session.num_teams);
     const playoffByes = clamp(integer($("playoffByes").value, state.session.playoff_bye_count || 0), 0, Math.max(playoffTeams - 2, 0));
@@ -460,15 +671,30 @@
     setStatus("Playoff settings updated.");
   }
 
+  // Return the next unfilled draft slot.
   function currentPick() {
     const picked = new Set(state.picks.map((pick) => pick.overall));
     return state.slots.find((slot) => !picked.has(slot.overall)) || null;
   }
 
+  // Return a team's next unfilled draft slot after the provided overall pick.
+  function nextPickForTeam(teamIndex, afterOverall) {
+    const picked = new Set(state.picks.map((pick) => integer(pick.overall)));
+    const team = integer(teamIndex);
+    return state.slots.find(
+      (slot) =>
+        integer(slot.current_team) === team &&
+        integer(slot.overall) > integer(afterOverall, -1) &&
+        !picked.has(integer(slot.overall))
+    ) || null;
+  }
+
+  // Build a lookup of cached players keyed by id.
   function playerByIdMap() {
     return new Map(state.players.map((player) => [String(player.player_id), player]));
   }
 
+  // Convert draft picks into per-team roster arrays.
   function rostersByTeam() {
     const players = playerByIdMap();
     const rosters = Array.from({ length: state.session?.num_teams || 0 }, () => []);
@@ -484,18 +710,21 @@
     return rosters;
   }
 
+  // Count rostered players by fantasy position.
   function rosterCounts(roster) {
     const counts = Object.fromEntries(positionOrder.map((position) => [position, 0]));
     for (const player of roster) counts[player.position] = (counts[player.position] || 0) + 1;
     return counts;
   }
 
+  // Return the maximum rosterable players for one position.
   function positionLimit(position, session = state.session) {
     const starters = integer(session.roster_settings?.[position], 0);
     const extra = integer(session.max_extra_per_position?.[position], 0);
     return starters + extra;
   }
 
+  // Check whether a player can legally fit on a team's roster.
   function canAddPlayer(teamIndex, player, rosters = rostersByTeam()) {
     if (!player) return false;
     if (draftedPlayerIds().has(String(player.player_id))) return false;
@@ -506,6 +735,7 @@
     return true;
   }
 
+  // Score how strongly a position fills open starter or flex needs.
   function needTier(teamIndex, position, rosters = rostersByTeam()) {
     const roster = rosters[teamIndex] || [];
     const counts = rosterCounts(roster);
@@ -537,11 +767,13 @@
     return openStarterSlots + flexValue;
   }
 
+  // List every cached player who has not been drafted.
   function undraftedPlayers() {
     const drafted = draftedPlayerIds();
     return state.players.filter((player) => !drafted.has(String(player.player_id)));
   }
 
+  // List legal candidates for the team currently on the clock.
   function draftablePlayersForCurrentPick() {
     const pick = currentPick();
     if (!pick) return [];
@@ -549,20 +781,34 @@
     return undraftedPlayers().filter((player) => canAddPlayer(pick.current_team, player, rosters));
   }
 
-  function scarcityBonus(player) {
-    const samePosition = state.players.filter((row) => row.position === player.position);
-    const index = samePosition.findIndex((row) => row.player_id === player.player_id);
-    const next = samePosition[index + 1];
-    if (!next) return 0;
-    return Math.max(number(player.projected_total_pts) - number(next.projected_total_pts), 0) * 0.25;
-  }
-
+  // Sort one position by projected total points for lineup and bot scoring.
   function positionSortedPlayers(players, position) {
     return players
     .filter((p) => p.position === position)
     .sort((a, b) => number(b.projected_total_pts) - number(a.projected_total_pts));
   }
 
+  // Resolve league size for calculations, tolerating older IndexedDB sessions.
+  function sessionTeamCount(session = state.session) {
+    return Math.max(
+      integer(session?.num_teams, 0),
+      Array.isArray(session?.team_names) ? session.team_names.length : 0,
+      Array.isArray(session?.teams) ? session.teams.length : 0,
+      integer(defaultConfig.num_teams, 0)
+    );
+  }
+
+  // Return the one-based VOR replacement rank for one position.
+  function replacementRankForPosition(position, session = state.session) {
+    if (position === "K" || position === "DEF") return 1;
+    const numTeams = sessionTeamCount(session);
+    const starters = integer(session?.roster_settings?.[position], 0);
+    const flexSlots = integer(session?.roster_settings?.FLEX, 0);
+    const flexShare = replacementFlexShareByPosition[position] ?? 0;
+    return Math.max(Math.ceil(numTeams * (starters + flexSlots * flexShare)), 1);
+  }
+
+  // Build replacement-level baselines for each position.
   function replacementPointsByPosition(players) {
     const out = {};
     const positions = [...new Set(players.map((p) => p.position))];
@@ -573,31 +819,20 @@
         out[position] = 0;
         continue;
       }
-      //total starters is the number of starters across ALL teams for this position, e.g. 10 teams with 2 RB starters = 20 total starters
-      const starters = integer(state.session.roster_settings?.[position], 0) * integer(state.session.num_teams, 0);
-
-      // Simple approximation:
-      // - the more required starters, the higher the replacement baseline
-      // - flex positions get a little extra replacement pressure
-      const flexShare = flexPositions.has(position)
-        ? integer(state.session.roster_settings?.FLEX, 0)
-        : 0;
-
-      const replacementIndex = Math.max(Math.ceil(starters + flexShare) - 1, 0);
+      const replacementIndex = replacementRankForPosition(position) - 1;
       const idx = Math.min(replacementIndex, sorted.length - 1);
-
       out[position] = number(sorted[idx]?.projected_total_pts ?? 0);
-
-      }
-
-      return out;
     }
+    return out;
+  }
 
+// Score a player against the replacement baseline for their position.
 function vorScore(player, replacementByPosition) {
   const replacement = replacementByPosition[player.position] ?? 0;
-  return Math.max(number(player.projected_total_pts) - replacement, 0);
+  return number(player.projected_total_pts) - replacement;
 }
 
+// Estimate how much same-position value may disappear before a team's next pick.
 function dropoffScore(player, candidates, teamIndex) {
   // drop off is the difference between this player and the player at the same position who is expected to be available at the next pick for this team.
   // e.g. in scoring dropoff for a WR at pick 15 (#2.1), the dropoff is the difference between this WR and the WR expected to be available at pick 42 (#3.14).
@@ -607,18 +842,12 @@ function dropoffScore(player, candidates, teamIndex) {
   if (currentPosIdx < 0 || currentPosIdx >= sortedByPos.length - 1) return 0;
 
   const current = currentPick();
-  const currentOverall = current?.overall ?? -1;
+  const currentOverall = integer(current?.overall, -1);
 
-  const nextUserPick = state.picks.find(
-    (pick) =>
-      pick.team_index === teamIndex &&
-      !isSkippedPick(pick) &&
-      pick.overall > currentOverall
-  );
+  const nextTeamPick = nextPickForTeam(teamIndex, currentOverall);
+  if (!nextTeamPick) return 0;
 
-  if (!nextUserPick) return 0;
-
-  const overallGap = Math.max(nextUserPick.overall - currentOverall - 1, 0);
+  const overallGap = Math.max(integer(nextTeamPick.overall) - currentOverall - 1, 0);
 
   // Global board = the players most likely to be drafted before our next turn.
   const globalBoard = sortPlayers(candidates);
@@ -642,6 +871,7 @@ function dropoffScore(player, candidates, teamIndex) {
   return gap;
 }
 
+// Add a roster-specific bonus for backup RBs behind a rostered starter.
 function handcuffBonus(player, roster) {
   if (player.position !== "RB") return 0;
 
@@ -669,6 +899,7 @@ function handcuffBonus(player, roster) {
   return Math.max(number(starter.projected_total_pts) - number(backup.projected_total_pts), 0) * 0.075; 
 }
 
+// Add a roster-specific correlation bonus for useful NFL-team stacks.
 function stackBonus(player, roster) {
   // Gives stack bonus for a player who has a teammate on the same NFL team in the roster so far.
   // e.g. if you have a WR from some team, then that team's QB is more valuable to you at a value of 8 additional points.
@@ -715,6 +946,90 @@ function stackBonus(player, roster) {
   return bonus;
 }
 
+// Convert board rank into a normalized positive score within the candidate pool.
+function rankScore(player, candidatePool) {
+  // lower rank is better, so we want to give a higher score for lower rank.
+  // e.g. rank 1 should be worth more than rank 10.
+  // also being the top ranked player on the board currently should have a spike as compared to being the second best, even
+
+  const rank = integer(player.rank, 0);
+  const poolRanks = [...new Set(
+    candidatePool.map((p) => integer(p.rank, 0)).filter((r) => r > 0))]
+    .sort((a, b) => a - b);
+
+  const index = poolRanks.indexOf(rank);
+  if (index < 0) return 0;
+
+  return 1 / (index + 1);
+}
+
+// Convert ADP into a normalized positive score within the candidate pool.
+function adpScore(player, candidatePool) {
+  // same implementation as rankScore, but using ADP instead of rank.
+  const adp = number(player.adp, 0);
+  const poolAdps = [...new Set(
+    candidatePool.map((p) => number(p.adp, 0)).filter((r) => r > 0))]
+    .sort((a, b) => a - b);
+
+  const index = poolAdps.indexOf(adp);
+  if (index < 0) return 0;
+
+  return 1 / (index + 1);
+}
+
+// Return an interpolated quantile from an already-sorted numeric list.
+function quantile(sortedValues, percentile) {
+  if (sortedValues.length === 0) return 0;
+  if (sortedValues.length === 1) return sortedValues[0];
+
+  const index = clamp(percentile, 0, 1) * (sortedValues.length - 1);
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  const weight = index - lower;
+  return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight;
+}
+
+// Preserve sign while applying a power curve to normalized score distance.
+function signedPower(value, gamma) {
+  if (value === 0) return 0;
+  return Math.sign(value) * Math.pow(Math.abs(value), gamma);
+}
+
+// Build a median/IQR normalizer so different score components share units.
+function robustComponentNormalizer(values, gamma = 1) {
+  const sorted = values
+    .map((value) => number(value, NaN))
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b);
+
+  if (sorted.length === 0) return () => 0;
+
+  const median = quantile(sorted, 0.5);
+  const q25 = quantile(sorted, 0.25);
+  const q75 = quantile(sorted, 0.75);
+  const spread = Math.max((q75 - q25) / 1.349, 1e-6);
+
+  return (value) => {
+    const z = (number(value) - median) / spread;
+    return signedPower(clamp(z / 2.5, -3, 3), gamma);
+  };
+}
+
+// Smoothly discount kickers and defenses until the final roster rounds.
+function positionTimingMultiplier(position, round) {
+  if (position !== "K" && position !== "DEF") return 1;
+
+  const currentRound = Math.max(integer(round, 1), 1);
+  const progress = clamp(currentRound / 15, 0, 1);
+  return Math.max(Math.pow(progress, 6), 0.02);
+}
+
+// Keep elite-player value live for normal positions, but fully time K/DEF.
+function untimedValueShare(position) {
+  return position === "K" || position === "DEF" ? 0 : 0.5;
+}
+
+// Randomly sample from scored candidates while favoring higher scores.
 function softmaxSample(items, scoreFn, temperature = 8) {
   // high temperature indicates more randomness, low temperature indicates more deterministic behavior.
   const scored = items.map((item) => scoreFn(item));
@@ -740,14 +1055,47 @@ function softmaxSample(items, scoreFn, temperature = 8) {
 
 
   let roll = Math.random() * total;
+  let chosenIndex = items.length-1;
 
   for (let i = 0; i < items.length; i += 1) {
     roll -= weights[i];
-    if (roll <= 0) return items[i];
+    if (roll <= 0){
+      chosenIndex=i;
+      break;
+    }
   }
-  return items[items.length - 1] || null;
+
+  const ranked = items.map((item, index) => ({
+    index, item, score: scored[index], weight: weights[index]
+  })).sort((a, b) => b.weight - a.weight);
+  const chosenRank = ranked.findIndex((entry) => entry.index === chosenIndex)+1;
+
+  // if(chosenRank > 3){
+  //   const payload = {
+  //     label: "bot-pick-suboptimal",
+  //     currentPick: currentPick(),
+  //     chosenRank,
+  //     chosenPlayer: {
+  //       player_name: items[chosenIndex].player_name
+  //     },
+  //     all_items: ranked.map((entry) => ({
+  //       player_name: entry.item.player_name,
+  //       value: entry.score,
+  //       vor: vorScore(entry.item, state.replacementBaselineByPosition),
+  //     }))
+  //   };
+
+  //   fetch("/api/log", {
+  //     method: "POST",
+  //     headers: { "Content-Type": "application/json" },
+  //     body: JSON.stringify(payload),
+  //   }).catch(() => {});
+  // }
+
+  return items[chosenIndex] || null;
 }
 
+// Choose a bot pick using value, roster need, ADP, rank, and roster synergy.
 function chooseBotPick(teamIndex) {
   const pick = currentPick();
   if (!pick) return null;
@@ -760,18 +1108,59 @@ function chooseBotPick(teamIndex) {
 
   const candidatePool = sortPlayers(candidates).slice(0, 40);
   const replacementByPosition = state.replacementBaselineByPosition || replacementPointsByPosition(state.players);
-  const startRounds = state.session.position_start_rounds || {};
+  const weights = scoreWeightsForTeam(teamIndex);
+  const rawComponentScores = candidatePool.map((player) => ({
+    player_id: String(player.player_id),
+    vor: vorScore(player, replacementByPosition),
+    rank: rankScore(player, candidatePool),
+    adp: adpScore(player, candidatePool),
+  }));
+  const rawComponentsByPlayerId = new Map(rawComponentScores.map((score) => [score.player_id, score]));
+  const normalizeComponent = {
+    vor: robustComponentNormalizer(rawComponentScores.map((score) => score.vor), 1.15),
+    rank: robustComponentNormalizer(rawComponentScores.map((score) => score.rank), 1),
+    adp: robustComponentNormalizer(rawComponentScores.map((score) => score.adp), 1),
+  };
 
+  // Score one candidate for the current bot pick.
   const scoreFn = (player) => {
     const need = needTier(teamIndex, player.position, rosters);
-    // const earlyPenalty = pick.round < integer(startRounds[player.position], 1) ? 45 : 0;
     const counts = rosterCounts(roster);
     //const benchPenalty =
     //  Math.max(1 + (counts[player.position] || 0) - integer(state.session.roster_settings?.[player.position], 0), 0) * 40;
-    const vor = vorScore(player, replacementByPosition);
+    const rawComponents = rawComponentsByPlayerId.get(String(player.player_id)) || {
+      vor: vorScore(player, replacementByPosition),
+      rank: rankScore(player, candidatePool),
+      adp: adpScore(player, candidatePool),
+    };
+    const vor = rawComponents.vor;
     const dropoff = dropoffScore(player, candidates, teamIndex);
     const handcuff = handcuffBonus(player, roster);
     const stack = stackBonus(player, roster);
+    const vorVal = normalizeComponent.vor(vor);
+    const rankValRaw = rawComponents.rank;
+    const rankVal = normalizeComponent.rank(rankValRaw);
+    const adpValRaw = rawComponents.adp;
+    const adpVal = normalizeComponent.adp(adpValRaw);
+    const timing = positionTimingMultiplier(player.position, pick.round);
+    const coreShare = untimedValueShare(player.position);
+    const timedShare = 1 - coreShare;
+    const coreValue = (
+      vorVal * weights.vor * coreShare
+      + rankVal * weights.rank * coreShare
+      + adpVal * weights.adp * coreShare
+    );
+    const timedValue = (
+      vorVal * weights.vor * timedShare
+      + need * weights.need
+      + dropoff * weights.dropoff
+      + handcuff * weights.handcuff
+      + stack * weights.stack
+      + rankVal * weights.rank * timedShare
+      + adpVal * weights.adp * timedShare
+    );
+
+    const score = coreValue + timedValue * timing;
     /*fetch("/api/log", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -779,39 +1168,40 @@ function chooseBotPick(teamIndex) {
         label: "softmax-debug",
         player_name: player.player_name,
         vor: vor,
+        vorVal: vorVal,
         need: need,
         dropoff: dropoff,
         handcuff: handcuff,
         stack: stack,
         rank: player.rank,
+        rankValRaw: rankValRaw,
+        rankVal: rankVal,
         adp: player.adp,
+        adpValRaw: adpValRaw,
+        adpVal: adpVal,
+        timing: timing,
+        //coreShare: coreShare,
+        coreValue: coreValue,
+        timedValue: timedValue,
+        //weights: weights,
+        score: score,
       }),
-    }).catch(() => {});*/
+    }).catch(() => {});//*/
 
-    return (
-      vor * 1.25 +
-      need * 20 +
-      dropoff * 0.6 +
-      handcuff +
-      stack -
-      // earlyPenalty -
-      //benchPenalty -
-      player.rank * 0.01 - // better rank means less penalty for this --> same thing as lower rank means more penalty, which is what we want
-      // i.e. we want to have value associated with the ESPN's rank
-      (player.adp ? player.adp * 0.01 : 0) // better ADP means less penalty for this, same as above
-    );
+    return score;
   };
-
   // Sample instead of argmax.
   return softmaxSample(candidatePool, scoreFn);
 }
 
+  // Update in-memory picks with one normalized draft pick.
   function upsertLocalDraftPick(draftPick) {
     state.picks = state.picks.filter((pick) => pick.overall !== draftPick.overall);
     state.picks.push(draftPick);
     state.picks.sort((a, b) => a.overall - b.overall);
   }
 
+  // Persist one draft pick after checking for duplicate players.
   async function persistDraftPick(draftPick) {
     const normalized = {
       ...draftPick,
@@ -841,6 +1231,7 @@ function chooseBotPick(teamIndex) {
     upsertLocalDraftPick(normalized);
   }
 
+  // Serialize draft actions so rapid clicks and bot picks cannot overlap.
   async function withDraftLock(action) {
     if (state.draftBusy) return false;
     state.draftBusy = true;
@@ -860,10 +1251,12 @@ function chooseBotPick(teamIndex) {
     }
   }
 
+  // Run a human or auto pick inside the draft lock.
   async function makePick(playerId, source = "human") {
     return withDraftLock(() => makePickUnlocked(playerId, source));
   }
 
+  // Apply one pick assuming the caller already owns the draft lock.
   async function makePickUnlocked(playerId, source = "human") {
     const pick = currentPick();
     if (!pick) return;
@@ -893,10 +1286,12 @@ function chooseBotPick(teamIndex) {
     await autoAdvanceBotsUnlocked();
   }
 
+  // Advance bot picks inside the draft lock.
   async function autoAdvanceBots() {
     return withDraftLock(autoAdvanceBotsUnlocked);
   }
 
+  // Continue drafting bot turns until the human team or draft end is reached.
   async function autoAdvanceBotsUnlocked() {
     if (!state.session?.draft_started) return;
     let guard = 0;
@@ -931,6 +1326,7 @@ function chooseBotPick(teamIndex) {
     }
   }
 
+  // Auto-pick for the current slot, including the human team when requested.
   async function autoPickCurrent() {
     return withDraftLock(async () => {
       const pick = currentPick();
@@ -952,6 +1348,7 @@ function chooseBotPick(teamIndex) {
     });
   }
 
+  // Resume bot picks after reload when a bot is still on the clock.
   async function resumeBotDraftIfNeeded() {
     const pick = currentPick();
     if (state.session?.draft_started && pick && pick.current_team !== state.session.human_team_index) {
@@ -959,6 +1356,7 @@ function chooseBotPick(teamIndex) {
     }
   }
 
+  // Build a player-week projection lookup from cached weekly rows.
   function weeklyProjectionMap() {
     const map = new Map();
     for (const row of state.weekly) {
@@ -967,11 +1365,13 @@ function chooseBotPick(teamIndex) {
     return map;
   }
 
+  // Pick the projected optimal lineup for one roster in one week.
   function optimalLineup(roster, week, scores) {
     let remaining = roster
       .map((player) => ({ ...player, points: scores.get(`${player.player_id}:${week}`) || 0 }))
       .sort((a, b) => b.points - a.points);
     const starters = [];
+    // Fill positional starter slots before flex slots.
     const take = (position, count, slotName) => {
       const matching = remaining.filter((player) => player.position === position).slice(0, count);
       starters.push(...matching.map((player) => ({ ...player, slot: slotName })));
@@ -990,6 +1390,7 @@ function chooseBotPick(teamIndex) {
     };
   }
 
+  // Generate a round-robin schedule when ESPN does not provide matchups.
   function generateRoundRobinSchedule(numTeams, weeks) {
     const teams = Array.from({ length: numTeams }, (_, index) => index);
     if (numTeams % 2 === 1) teams.push(null);
@@ -1009,6 +1410,7 @@ function chooseBotPick(teamIndex) {
     return new Map(weeks.map((week, index) => [week, rounds[index % rounds.length] || []]));
   }
 
+  // Select synced league schedule rows or fall back to generated pairings.
   function activeScheduleForWeeks(weeks) {
     const weekSet = new Set(weeks);
     const schedule = new Map();
@@ -1026,12 +1428,14 @@ function chooseBotPick(teamIndex) {
       : generateRoundRobinSchedule(state.session.num_teams, weeks);
   }
 
+  // Label a playoff round based on teams still alive.
   function playoffRoundLabel(teamCount) {
     if (teamCount <= 2) return "Championship";
     if (teamCount <= 4) return "Semifinal";
     return "Quarterfinal";
   }
 
+  // Resolve a head-to-head projected winner for one playoff matchup.
   function projectedWinner(home, away, week, scoreLookup) {
     const homeScore = scoreLookup.get(`${week}:${home.team_index}`) || 0;
     const awayScore = scoreLookup.get(`${week}:${away.team_index}`) || 0;
@@ -1042,6 +1446,7 @@ function chooseBotPick(teamIndex) {
     };
   }
 
+  // Simulate the configured playoff bracket from regular-season standings.
   function simulatePlayoffs(standings, playoffWeeks, scoreLookup) {
     const playoffTeamCount = clamp(integer(state.session.playoff_team_count, Math.min(6, state.session.num_teams)), 2, state.session.num_teams);
     const playoffByeCount = clamp(integer(state.session.playoff_bye_count, 0), 0, Math.max(playoffTeamCount - 2, 0));
@@ -1101,6 +1506,7 @@ function chooseBotPick(teamIndex) {
     return { playoffMatchups, playoffChampion: champion };
   }
 
+  // Simulate standings and playoffs from the current drafted rosters.
   function simulateDraft() {
     if (!state.session || state.picks.length !== state.slots.length || state.slots.length === 0) return null;
     const rosters = rostersByTeam();
@@ -1181,6 +1587,7 @@ function chooseBotPick(teamIndex) {
     return { weeks: [...matchupWeeks, ...playoffWeeks], regularWeeks: matchupWeeks, playoffWeeks, weeklyTeamScores, standings, weeklyMatchups, ...playoffs };
   }
 
+  // Convert a draft slot into the compact trade-reference shape.
   function slotToRef(slot) {
     return {
       overall: slot.overall,
@@ -1190,16 +1597,19 @@ function chooseBotPick(teamIndex) {
     };
   }
 
+  // Format a pick reference for saved-trade display.
   function pickRefLabel(ref) {
     return `#${ref.round}.${ref.pick_in_round}`;
   }
 
+  // Guard trade edits after draft order has been locked by picks.
   function assertDraftOrderEditable() {
     if (state.session?.draft_started || state.picks.length > 0) {
       throw new Error("Pick trades must be set before the draft starts.");
     }
   }
 
+  // Return a stable key for the current trade form inputs.
   function tradeFormKey() {
     return JSON.stringify({
       team_a: integer($("tradeTeamA").value, 0),
@@ -1210,15 +1620,18 @@ function chooseBotPick(teamIndex) {
     });
   }
 
+  // Check whether either trade textarea currently has content.
   function hasPendingTradeForm() {
     return Boolean($("tradePicksA").value.trim() || $("tradePicksB").value.trim());
   }
 
+  // Find an applied trade matching the current form contents.
   function matchingTradeForForm() {
     const key = tradeFormKey();
     return state.trades.find((trade) => trade.form_key === key) || null;
   }
 
+  // Ensure a trade token refers to a pick currently owned by the side's team.
   function assertPickOwnedByTeam(slot, teamIndex, token) {
     if (!slot) throw new Error(`Unknown pick ${token}.`);
     if (slot.current_team !== teamIndex) {
@@ -1226,6 +1639,7 @@ function chooseBotPick(teamIndex) {
     }
   }
 
+  // Parse one pick token from the trade form into a draft slot reference.
   function parsePickToken(token, teamIndex) {
     const value = token.trim();
     if (!value) return null;
@@ -1254,6 +1668,7 @@ function chooseBotPick(teamIndex) {
     return slotToRef(slot);
   }
 
+  // Parse a newline-separated list of pick tokens for one team.
   function parseTradePickList(text, teamIndex) {
     const seen = new Set();
     return text
@@ -1269,6 +1684,7 @@ function chooseBotPick(teamIndex) {
       });
   }
 
+  // Build a two-sided pick trade from the form.
   function buildTrade({ temporary = false } = {}) {
     assertDraftOrderEditable();
     const teamA = integer($("tradeTeamA").value, 0);
@@ -1293,6 +1709,7 @@ function chooseBotPick(teamIndex) {
     };
   }
 
+  // Apply a temporary trade preview without saving it.
   async function testTrade() {
     let trade;
     try {
@@ -1312,6 +1729,7 @@ function chooseBotPick(teamIndex) {
     render();
   }
 
+  // Persist the current trade form into IndexedDB.
   async function saveTrade() {
     let trade;
     try {
@@ -1341,6 +1759,7 @@ function chooseBotPick(teamIndex) {
     render();
   }
 
+  // Delete a saved or temporary trade and rebuild draft slots.
   async function deleteTrade(id) {
     try {
       assertDraftOrderEditable();
@@ -1355,6 +1774,7 @@ function chooseBotPick(teamIndex) {
     render();
   }
 
+  // Normalize schedule rows from sync payloads into IndexedDB-ready objects.
   function normalizeLeagueSchedule(rows, teams) {
     const teamIndexById = new Map(teams.map((team, index) => [String(team.team_id), index]));
     const normalized = [];
@@ -1379,14 +1799,15 @@ function chooseBotPick(teamIndex) {
         away_team_index: awayIndex,
         home_team_id: row.home_team_id == null ? teams[homeIndex]?.team_id : row.home_team_id,
         away_team_id: row.away_team_id == null ? teams[awayIndex]?.team_id : row.away_team_id,
-        home_team: row.home_team || teams[homeIndex]?.team_name || `Team ${homeIndex + 1}`,
-        away_team: row.away_team || teams[awayIndex]?.team_name || `Team ${awayIndex + 1}`,
+        home_team: row.home_team || teams[homeIndex]?.team_name || fallbackTeamName(homeIndex),
+        away_team: row.away_team || teams[awayIndex]?.team_name || fallbackTeamName(awayIndex),
         source: row.source || "espn_schedule",
       });
     }
     return normalized.sort((a, b) => integer(a.week) - integer(b.week) || integer(a.home_team_index) - integer(b.home_team_index));
   }
 
+  // Save an ESPN or demo projection payload into local browser storage.
   async function saveProjectionPayload(payload, source) {
     const players = (payload.players || []).map((player) => ({
       ...player,
@@ -1405,15 +1826,13 @@ function chooseBotPick(teamIndex) {
       week: integer(row.week),
       projected_points: number(row.projected_points),
     }));
-    const teams = payload.teams?.length
-      ? payload.teams.map((team, index) => ({
-        ...team,
-        team_id: team.team_id == null ? index + 1 : team.team_id,
-        team_name: team.team_name || payload.team_names?.[index] || `Team ${index + 1}`,
-        draft_slot: integer(team.draft_slot, index + 1),
-      }))
-      : (payload.team_names?.length ? payload.team_names : defaultTeamNames(defaultConfig.num_teams || 10))
-        .map((name, index) => ({ team_id: index + 1, team_name: name, draft_slot: index + 1 }));
+    const payloadNumTeams = payload.teams?.length || payload.team_names?.length || defaultConfig.num_teams || 10;
+    const namesFromPayload = teamNamesFromSources({
+      teams: payload.teams || [],
+      teamNames: payload.team_names || [],
+      numTeams: payloadNumTeams,
+    });
+    const teams = teamsWithResolvedNames({ teams: payload.teams || [] }, namesFromPayload);
     const names = teams.map((team) => team.team_name);
     const draftSlots = (payload.draft_slots || []).map((slot) => ({
       overall: integer(slot.overall),
@@ -1436,6 +1855,7 @@ function chooseBotPick(teamIndex) {
       draft_slots: draftSlots,
       projection_meta: payload.projection_meta || {},
       draft_started: false,
+      score_weights_by_team: state.session?.score_weights_by_team || {},
       source,
     });
     await clearTables(["players", "weekly_projections", "league_schedule", "draft_slots", "pick_trades", "draft_picks"]);
@@ -1453,6 +1873,7 @@ function chooseBotPick(teamIndex) {
     await loadState();
   }
 
+  // Lock draft slots and start bot drafting.
   async function startDraft() {
     if (state.draftBusy) return;
     if (!state.slots.length) {
@@ -1475,6 +1896,7 @@ function chooseBotPick(teamIndex) {
     });
   }
 
+  // Build deterministic demo projections when ESPN sync is not available.
   function demoPayload() {
     const positions = { QB: 32, RB: 72, WR: 84, TE: 36, K: 32, DEF: 32 };
     const base = { QB: 285, RB: 210, WR: 200, TE: 145, K: 125, DEF: 130 };
@@ -1519,6 +1941,7 @@ function chooseBotPick(teamIndex) {
     };
   }
 
+  // Describe which weekly projection source was normalized.
   function weeklyProjectionLabel(meta) {
     const sources = meta?.weekly_projection_sources || {};
     const espnWeekly = integer(sources.espn_weekly) + integer(sources.espn_raw_weekly);
@@ -1529,11 +1952,13 @@ function chooseBotPick(teamIndex) {
     return "";
   }
 
+  // Count raw ESPN weekly projection rows for sync status copy.
   function rawWeeklyProjectionCount(meta) {
     const stats = meta?.raw_projection_stats || {};
     return integer(stats.projected_week_rows_with_total || stats.projected_week_rows);
   }
 
+  // Build the user-facing message after projection sync completes.
   function projectionSyncStatus(result) {
     const label = weeklyProjectionLabel(result.projection_meta);
     if (label === "season-total fallback projections") {
@@ -1546,6 +1971,7 @@ function chooseBotPick(teamIndex) {
     return `Synced ${result.players.length} players${label ? ` with ${label}` : ""}.`;
   }
 
+  // POST the sync form to the Python projection endpoint.
   async function syncEspn() {
     const payload = {
       league_id: $("leagueId").value.trim(),
@@ -1568,6 +1994,7 @@ function chooseBotPick(teamIndex) {
     setStatus(projectionSyncStatus(result));
   }
 
+  // Export all local IndexedDB tables as a JSON file.
   async function exportLocalData() {
     const payload = {};
     for (const table of TABLES) payload[table] = await db.table(table).toArray();
@@ -1579,6 +2006,7 @@ function chooseBotPick(teamIndex) {
     URL.revokeObjectURL(link.href);
   }
 
+  // Import a previously exported IndexedDB JSON snapshot.
   async function importLocalData() {
     const payload = JSON.parse($("importPayload").value || "{}");
     for (const table of TABLES) {
@@ -1590,6 +2018,7 @@ function chooseBotPick(teamIndex) {
     setStatus("Local data imported.");
   }
 
+  // Clear all local browser data after user confirmation.
   async function resetLocalData() {
     if (!confirm("Reset all local draft simulator data in this browser?")) return;
     await clearTables(TABLES);
@@ -1598,6 +2027,7 @@ function chooseBotPick(teamIndex) {
     setStatus("Local data reset.");
   }
 
+  // Render current draft status and clock button states.
   function renderClock() {
     const pick = currentPick();
     const started = Boolean(state.session?.draft_started);
@@ -1614,7 +2044,7 @@ function chooseBotPick(teamIndex) {
       $("clockMeta").textContent = "Projected season results are available below.";
       return;
     }
-    $("clockTeam").textContent = state.session.team_names[pick.current_team] || `Team ${pick.current_team + 1}`;
+    $("clockTeam").textContent = teamName(pick.current_team);
     const paused = state.draftBusy ? "Drafting... " : (started ? "" : "Draft paused. Start Draft when ready. ");
     $("clockMeta").textContent = `${paused}Round ${pick.round}, pick ${pick.pick_in_round}, overall ${pick.overall}`;
   }
@@ -1632,6 +2062,7 @@ function chooseBotPick(teamIndex) {
     percent_owned: "desc",
   };
 
+  // Return the comparable value for one available-board sort key.
   function availableSortValue(player, key) {
     if (key === "rank") return integer(player.rank) > 0 ? integer(player.rank) : null;
     if (key === "bye_week") return integer(player.bye_week) > 0 ? integer(player.bye_week) : null;
@@ -1643,12 +2074,14 @@ function chooseBotPick(teamIndex) {
     return player[key] || "";
   }
 
+  // Sort available board rows using the active sort selection.
   function sortAvailableRows(rows) {
     const { key, direction } = state.availableSort;
     if (!key || key === "default") return rows;
     return rows.slice().sort((a, b) => compareValues(availableSortValue(a, key), availableSortValue(b, key), direction));
   }
 
+  // Attach click handlers to the available-board sortable headers.
   function bindAvailableSortHeaders() {
     document.querySelectorAll("#available [data-sort-key]").forEach((header) => {
       header.addEventListener("click", () => {
@@ -1663,6 +2096,7 @@ function chooseBotPick(teamIndex) {
     });
   }
 
+  // Render the searchable, sortable available-player draft board.
   function renderAvailable() {
     const query = $("search").value.trim().toLowerCase();
     const position = $("positionFilter").value;
@@ -1696,10 +2130,12 @@ function chooseBotPick(teamIndex) {
     });
   }
 
+  // Return a display name for a team index.
   function teamName(index) {
-    return state.session.team_names[index] || `Team ${index + 1}`;
+    return state.session.team_names[index] || fallbackTeamName(index);
   }
 
+  // Summarize unfilled starter needs for a roster.
   function rosterNeedsText(index, roster) {
     const counts = rosterCounts(roster);
     return positionOrder
@@ -1709,6 +2145,7 @@ function chooseBotPick(teamIndex) {
       .join(", ") || "Starter slots filled";
   }
 
+  // Build roster HTML for the current-team and selected-team panels.
   function rosterMarkup(index, { compact = false } = {}) {
     const roster = rostersByTeam()[index] || [];
     const needs = rosterNeedsText(index, roster);
@@ -1723,10 +2160,12 @@ function chooseBotPick(teamIndex) {
       <ul class="${compact ? "compact-roster" : "roster-list"}"><li class="roster-heading"><span>Player</span><strong>Pos</strong><span class="roster-bye">Bye</span></li>${rows}</ul>`;
   }
 
+  // Render the human team's compact roster panel.
   function renderCurrentRoster() {
     $("currentRoster").innerHTML = rosterMarkup(integer(state.session.human_team_index, 0), { compact: true });
   }
 
+  // Render completed picks or scheduled picks in the draft log.
   function renderDraftLog() {
     const players = playerByIdMap();
     const rows = state.picks.length
@@ -1759,6 +2198,7 @@ function chooseBotPick(teamIndex) {
     ]);
   }
 
+  // Render saved and temporary pick trades.
   function renderTrades() {
     const locked = Boolean(state.draftBusy || state.session?.draft_started || state.picks.length > 0);
     $("testTrade").disabled = locked;
@@ -1786,11 +2226,13 @@ function chooseBotPick(teamIndex) {
     });
   }
 
+  // Render the roster selected in the Rosters tab.
   function renderSelectedRoster() {
     const index = Math.max(Math.min(integer($("rosterTeam").value, state.session.human_team_index), state.session.num_teams - 1), 0);
     $("selectedRoster").innerHTML = rosterMarkup(index);
   }
 
+  // Render projected standings, matchups, and playoffs.
   function renderResults() {
     if (!state.results) {
       $("resultsPanel").classList.add("hidden");
@@ -1833,6 +2275,7 @@ function chooseBotPick(teamIndex) {
     ]);
   }
 
+  // Render top-level sync/cache metadata.
   function renderSyncMeta() {
     const synced = state.session?.synced_at ? new Date(state.session.synced_at).toLocaleString() : "never";
     const source = state.session?.source || "empty";
@@ -1841,12 +2284,14 @@ function chooseBotPick(teamIndex) {
     $("syncMeta").textContent = `${state.players.length} players cached | ${source} | synced ${synced}${weekly ? ` | ${weekly}` : ""}${rawWeekly ? ` | raw weekly rows ${rawWeekly}` : ""}`;
   }
 
+  // Render browser online/offline status.
   function renderOnlineStatus() {
     const online = navigator.onLine;
     $("onlineStatus").textContent = online ? "Online" : "Offline";
     $("onlineStatus").className = online ? "pill" : "pill offline";
   }
 
+  // Show one tab panel or collapse all panels.
   function setActiveTab(tabId) {
     document.querySelectorAll("[data-tab]").forEach((button) => {
       button.classList.toggle("active", button.getAttribute("data-tab") === tabId);
@@ -1857,6 +2302,7 @@ function chooseBotPick(teamIndex) {
     $("tabPanels").classList.toggle("hidden", !tabId);
   }
 
+  // Refresh all visible app panels from current state.
   function render() {
     renderSyncMeta();
     renderOnlineStatus();
@@ -1870,6 +2316,7 @@ function chooseBotPick(teamIndex) {
     renderResults();
   }
 
+  // Attach browser event handlers once during startup.
   function bindEvents() {
     document.querySelectorAll("[data-tab]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -1903,6 +2350,9 @@ function chooseBotPick(teamIndex) {
     $("saveTrade").addEventListener("click", saveTrade);
     $("playoffTeams").addEventListener("change", savePlayoffSettings);
     $("playoffByes").addEventListener("change", savePlayoffSettings);
+    $("scoreWeightTeam").addEventListener("change", writeScoreWeightInputs);
+    $("saveScoreWeights").addEventListener("click", () => saveScoreWeightInputs());
+    $("resetScoreWeights").addEventListener("click", resetScoreWeightInputs);
     $("rosterTeam").addEventListener("change", renderSelectedRoster);
     $("search").addEventListener("input", renderAvailable);
     $("positionFilter").addEventListener("change", renderAvailable);
