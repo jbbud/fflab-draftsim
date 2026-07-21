@@ -36,6 +36,10 @@
   const scoreWeightUnitVersion = "normalized-v1";
   const legacyVorWeightScale = 20;
   const positionPreferencePositions = ["QB", "TE", "K", "DEF"];
+  const backupSensitivePositions = new Set(["QB", "TE"]);
+  const preferredBenchDepth = { RB: 5, WR: 5 };
+  const backupRoundThreshold = { QB: 11, TE: 12 };
+  const leagueSaturationThreshold = { QB: { start: 14, target: 20 }, TE: { start: 14, target: 19 } };
   const positionPreferenceFields = ["first_earliest", "first_latest", "backup_earliest", "backup_latest"];
   const positionPreferenceInputIds = {
     QB: {
@@ -66,13 +70,14 @@
   const positionPreferenceMaxAdjustment = 24;
   const favoriteTeamScoreBonus = 8;
   const defaultScoreWeights = {
-    vor: number(defaultConfig.score_weights?.vor, 25),
-    need: number(defaultConfig.score_weights?.need, 20),
-    dropoff: number(defaultConfig.score_weights?.dropoff, 0.6),
-    handcuff: number(defaultConfig.score_weights?.handcuff, 1),
-    stack: number(defaultConfig.score_weights?.stack, 1),
-    rank: number(defaultConfig.score_weights?.rank, 25),
-    adp: number(defaultConfig.score_weights?.adp, 25),
+    vor: number(defaultConfig.score_weights?.vor, 200),
+    need: number(defaultConfig.score_weights?.need, 34.68),
+    dropoff: number(defaultConfig.score_weights?.dropoff, 0.379),
+    handcuff: number(defaultConfig.score_weights?.handcuff, 1.0),
+    stack: number(defaultConfig.score_weights?.stack, 1.0),
+    rank: number(defaultConfig.score_weights?.rank, 75.99),
+    adp: number(defaultConfig.score_weights?.adp, 63.38),
+    backupPenalty: number(defaultConfig.score_weights?.backupPenalty, 1.58),
     positionPreference: number(defaultConfig.score_weights?.positionPreference, 0),
     favoriteTeam: number(defaultConfig.score_weights?.favoriteTeam, 0),
   };
@@ -84,6 +89,7 @@
     { key: "stack", inputId: "weightStack" },
     { key: "rank", inputId: "weightRank" },
     { key: "adp", inputId: "weightAdp" },
+    { key: "backupPenalty", inputId: "weightBackupPenalty" },
     { key: "positionPreference", inputId: "weightPositionPreference" },
     { key: "favoriteTeam", inputId: "weightFavoriteTeam" },
   ];
@@ -992,6 +998,74 @@
     return openStarterSlots + flexValue;
   }
 
+  // Penalize low-leverage QB2/TE2 picks when core RB/WR depth is still thin.
+  function rosterSurplusPenalty(player, roster) {
+    const position = String(player?.position || "");
+    if (!backupSensitivePositions.has(position)) return 0;
+
+    const counts = rosterCounts(roster);
+    const starters = Math.max(integer(state.session?.roster_settings?.[position], 0), 1);
+    const currentAtPosition = integer(counts[position], 0);
+    if (currentAtPosition < starters) return 0;
+
+    const round = Math.max(integer(currentPick()?.round, 1), 1);
+    const threshold = backupRoundThreshold[position] || 12;
+    const basePenalty = round < threshold ? 70 : 35;
+    const rbWrShortage = Object.entries(preferredBenchDepth).reduce(
+      (sum, [pos, target]) => sum + Math.max(integer(target) - integer(counts[pos], 0), 0),
+      0
+    );
+
+    return basePenalty + rbWrShortage * 10 + Math.max(currentAtPosition - starters, 0) * 1000;
+  }
+
+  // Nudge positions into more realistic round windows without banning value falls.
+  function roundMismatchPenalty(player, roster) {
+    const position = String(player?.position || "");
+    if (!backupSensitivePositions.has(position)) return 0;
+
+    const counts = rosterCounts(roster);
+    const starters = Math.max(integer(state.session?.roster_settings?.[position], 0), 1);
+    const round = Math.max(integer(currentPick()?.round, 1), 1);
+    const posRank = integer(player?.pos_rank, 99);
+
+    if (integer(counts[position], 0) >= starters) {
+      const threshold = backupRoundThreshold[position] || 12;
+      if (round < threshold) return (threshold - round) * 8;
+      return 0;
+    }
+
+    if (position === "QB") {
+      if (round <= 2) return posRank <= 1 ? 15 : 60;
+      if (round <= 5) return posRank <= 3 ? 0 : 30;
+    }
+    if (position === "TE") {
+      if (round <= 3) return posRank <= 3 ? 0 : 45;
+    }
+    return 0;
+  }
+
+  // Slow room-wide QB/TE runs once the draft approaches historical demand.
+  function leagueSaturationPenalty(position, playerMap = playerByIdMap()) {
+    const window = leagueSaturationThreshold[position];
+    if (!window) return 0;
+    const draftedCount = state.picks.reduce((sum, pick) => {
+      if (isSkippedPick(pick)) return sum;
+      const draftedPlayer = playerMap.get(String(pick.player_id));
+      return sum + (draftedPlayer?.position === position ? 1 : 0);
+    }, 0);
+    if (draftedCount < window.start) return 0;
+    const progress = clamp((draftedCount - window.start + 1) / Math.max(window.target - window.start + 1, 1), 0, 1);
+    return 15 + Math.pow(progress, 1.4) * 55;
+  }
+
+  // Combine roster, round, and league-room opportunity costs for QB/TE.
+  function backupPositionPenalty(player, roster, playerMap = playerByIdMap()) {
+    return rosterSurplusPenalty(player, roster)
+      + roundMismatchPenalty(player, roster)
+      + leagueSaturationPenalty(player?.position, playerMap);
+  }
+
   // List every cached player who has not been drafted.
   function undraftedPlayers() {
     const drafted = draftedPlayerIds();
@@ -1377,6 +1451,7 @@ function chooseBotPick(teamIndex) {
   const candidatePool = sortPlayers(candidates).slice(0, 40);
   const replacementByPosition = state.replacementBaselineByPosition || replacementPointsByPosition(state.players);
   const weights = scoreWeightsForTeam(teamIndex);
+  const playerMap = playerByIdMap();
   const rawComponentScores = candidatePool.map((player) => ({
     player_id: String(player.player_id),
     vor: vorScore(player, replacementByPosition),
@@ -1413,6 +1488,7 @@ function chooseBotPick(teamIndex) {
     const timing = positionTimingMultiplier(player.position, pick.round);
     const positionPreference = positionPreferenceAdjustment(teamIndex, player, pick, roster);
     const favoriteTeam = favoriteTeamAdjustment(teamIndex, player);
+    const backupPenalty = backupPositionPenalty(player, roster, playerMap);
     const coreShare = untimedValueShare(player.position);
     const timedShare = 1 - coreShare;
     const coreValue = (
@@ -1430,6 +1506,7 @@ function chooseBotPick(teamIndex) {
       + adpVal * weights.adp * timedShare
       + positionPreference * weights.positionPreference
       + favoriteTeam * weights.favoriteTeam
+      - backupPenalty * weights.backupPenalty
     );
 
     const score = coreValue + timedValue * timing;
@@ -1454,6 +1531,8 @@ function chooseBotPick(teamIndex) {
         timing: timing,
         positionPreference: positionPreference,
         favoriteTeam: favoriteTeam,
+        backupPenalty: backupPenalty,
+        backupPenaltyWeight: weights.backupPenalty,
         positionPreferenceWeight: weights.positionPreference,
         favoriteTeamWeight: weights.favoriteTeam,
         //coreShare: coreShare,

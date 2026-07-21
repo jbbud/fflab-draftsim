@@ -153,12 +153,19 @@ def test_static_assets_include_dexie_schema_and_offline_logic() -> None:
     assert 'team !== "NONE"' in app
     assert "positionPreferenceWeight" in app
     assert "favoriteTeamWeight" in app
+    assert "backupPenaltyWeight" in app
     assert "nextPickForTeam" in app
     assert "state.slots.find" in app
     assert "positionTimingMultiplier" in app
     assert 'position !== "K" && position !== "DEF"' in app
     assert "currentRound / 15" in app
     assert "Math.pow(progress, 6)" in app
+    assert "backupPositionPenalty" in app
+    assert "rosterSurplusPenalty" in app
+    assert "roundMismatchPenalty" in app
+    assert "leagueSaturationPenalty" in app
+    assert "preferredBenchDepth" in app
+    assert "backupPenalty" in app
     assert "untimedValueShare" in app
     assert "coreShare" in app
     assert "timingStrengthByPosition" not in app
@@ -198,6 +205,7 @@ def test_static_assets_include_dexie_schema_and_offline_logic() -> None:
     assert 'id="scoreWeightTeam"' in web.HTML
     assert 'id="saveScoreWeights"' in web.HTML
     assert 'id="weightVor"' in web.HTML
+    assert 'id="weightBackupPenalty"' in web.HTML
     assert 'id="weightPositionPreference"' in web.HTML
     assert 'id="weightFavoriteTeam"' in web.HTML
     assert "Draft Intel Position Windows" in web.HTML
@@ -228,7 +236,7 @@ def test_static_assets_include_dexie_schema_and_offline_logic() -> None:
     assert ".clock-actions" in css
     assert ".playoff-section" in css
     assert ".weight-grid" in css
-    assert "repeat(9" in css
+    assert "repeat(10" in css
     assert ".position-preferences" in css
     assert ".preference-grid" in css
     assert ".favorite-teams" in css
@@ -240,17 +248,44 @@ def test_static_assets_include_dexie_schema_and_offline_logic() -> None:
     assert ".grid.four" not in css
 
     assert "BASELINE_WEIGHTS" in trainer
+    assert "backupPenalty: 1.58" in trainer
+    assert "backupPenalty: [0, 2.5]" in trainer
     assert "positionPreference" not in trainer
     assert "favoriteTeam" not in trainer
+    assert "targetTeams" in trainer
+    assert "parseTargetTeams" in trainer
+    assert "targetTeamSampleRate" in trainer
+    assert "targetTeamSampleMin" in trainer
+    assert "fullHoldout" in trainer
+    assert "boolean(value" in trainer
+    assert "targetTeamBatches" in trainer
+    assert "sampleTargetTeams" in trainer
+    assert "targetTeamSampleSize" in trainer
+    assert "stageSeedSalt" in trainer
+    assert "stage_one_target_team_batches" in trainer
+    assert "stage_two_target_team_batches" in trainer
+    assert "target_team_sample_rate" in trainer
+    assert "target_team_sample_min" in trainer
+    assert "full_holdout" in trainer
+    assert "target_teams" in trainer
+    assert "per_team" in trainer
     assert "syncEnvLeaguePayload" in trainer
     assert "payload_with_env_credentials" in trainer
     assert "ESPN league from .env" in trainer
     assert "demoPayload" in trainer
     assert "evaluateWeights" in trainer
+    assert "createProgressLogger" in trainer
+    assert "formatDuration" in trainer
+    assert "batchEvaluationCount" in trainer
+    assert "console.error(`[${label}] ${completed}/${safeTotal} evals" in trainer
     assert "sampleWeights" in trainer
     assert "stageOne" in trainer
     assert "stageTwo" in trainer
     assert "traceOut" in trainer
+    assert "backupPositionPenalty" in trainer
+    assert "backupPenaltyWeight" in trainer
+    assert "LEAGUE_SATURATION_THRESHOLD" in trainer
+    assert "PREFERRED_BENCH_DEPTH" in trainer
     assert "selected_player_name" in trainer
     assert "holdout_mean_delta" in trainer
-    assert "target team projected optimal-lineup season points" in trainer
+    assert "selected target teams projected optimal-lineup season points" in trainer

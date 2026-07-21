@@ -186,6 +186,7 @@ The score-weight editor lets you pick a team and tune:
 - `Stack`
 - `Rank`
 - `ADP`
+- `Backup Penalty`
 - `Position Windows`
 - `Favorite Teams`
 
@@ -193,7 +194,9 @@ VOR, rank, and ADP are normalized per bot pick with median/IQR scaling before we
 
 Position-window and favorite-team preference weights default to zero, so those preference sections do not affect mock drafts unless you opt a team into them.
 
-Kickers and defenses are timing-discounted against round 15. QB, RB, WR, and TE do not use a position start-round discount.
+Kickers and defenses are timing-discounted against round 15. QB, RB, WR, and TE do not use a broad position start-round discount.
+
+QB and TE backups receive extra opportunity-cost pressure in one-QB roster builds. After a team has filled its starter at QB or TE, the bot scorer subtracts roster-surplus, round-mismatch, and league-saturation penalties multiplied by the `Backup Penalty` weight, so similarly valued RB/WR depth is usually preferred unless the backup has clear falling value.
 
 ## Bot Scoring Notes
 
@@ -206,6 +209,7 @@ For each bot pick, the app evaluates legal candidates for the current roster and
 - normalized rank value
 - normalized ADP value
 - K/DEF timing discount
+- QB/TE backup opportunity-cost penalties
 
 The VOR replacement baseline scales with league size and roster settings. In a 14-team league, the default baseline is:
 
@@ -297,7 +301,11 @@ node tools/train_standard_weights.mjs --candidates 96 --seeds 12 --survivors 16 
 
 By default, the script loads `.env` and syncs the league referenced by `LEAGUE_ID`, `YEAR`, `WEEK_START`, `WEEK_END`, `ESPN_S2`, and `SWID`, using the same server-side credential flow as the GUI. Use `--data export.json` to train from a browser export instead, or `--demo` for an offline synthetic smoke run.
 
-The harness tunes only the seven standard scorer weights:
+By default, the trainer optimizes for `--target-team 0`. Use `--target-teams all` to train one shared global weight vector across every team index, or pass an explicit subset such as `--target-teams 0,3,7`. Training stages sample target-team mini-batches by seed when multiple target teams are selected; tune that with `--target-team-sample-rate 0.3` and `--target-team-sample-min 1`. Final holdout evaluates every selected target team by default; pass `--full-holdout false` only when you want holdout to use the same sampling strategy.
+
+The trainer prints stage progress to stderr with completed evaluation count, elapsed time, and ETA. The final JSON report is still printed to stdout and optionally written with `--out`.
+
+The harness tunes these standard scorer weights:
 
 - `vor`
 - `rank`
@@ -306,10 +314,11 @@ The harness tunes only the seven standard scorer weights:
 - `dropoff`
 - `handcuff`
 - `stack`
+- `backupPenalty`
 
-It does not train the `Position Windows` or `Favorite Teams` preference weights; those stay user-controlled and default to zero. It evaluates candidate weights for one target team against baseline-weight opponents using seeded random search plus successive halving. The first objective is projected optimal-lineup season points for the target team, with a holdout seed set reported separately from tuning seeds.
+It does not train the `Position Windows` or `Favorite Teams` preference weights; those stay user-controlled and default to zero. It evaluates candidate weights for the selected target team or teams against baseline-weight opponents using seeded random search plus successive halving. The first objective is projected optimal-lineup season points, with a holdout seed set reported separately from tuning seeds.
 
-Use `--trace-out` to write the promoted candidate's pick-level score breakdown, including VOR, rank, ADP, need, dropoff, handcuff, stack, timing, and selected player details.
+Use `--trace-out` to write the promoted candidate's pick-level score breakdown, including VOR, rank, ADP, need, dropoff, handcuff, stack, backup penalty, timing, and selected player details.
 
 ## Troubleshooting
 

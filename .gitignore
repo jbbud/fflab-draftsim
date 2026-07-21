@@ -11,6 +11,8 @@ dist/
 .venv/
 venv/
 models/
+weight-report*.json
+pick-trace*.json
 .env
 .env.*
 !.env.example

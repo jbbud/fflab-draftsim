@@ -33,13 +33,14 @@ DEFAULT_GUI_CONFIG: dict[str, Any] = {
         "DEF": 0,
     },
     "score_weights": {
-        "vor": 100,
-        "need": 20,
-        "dropoff": 0.6,
-        "handcuff": 1,
-        "stack": 1,
-        "rank": 100,
-        "adp": 100,
+        "vor": 200,
+        "need": 34.68,
+        "dropoff": 0.379,
+        "handcuff": 1.0,
+        "stack": 1.0,
+        "rank": 75.99,
+        "adp": 63.38,
+        "backupPenalty": 1.58,
         "positionPreference": 0,
         "favoriteTeam": 0,
     },
@@ -120,6 +121,7 @@ HTML = """<!doctype html>
             <label>Stack<input id="weightStack" type="number" step="0.25"></label>
             <label>Rank<input id="weightRank" type="number" step="0.5"></label>
             <label>ADP<input id="weightAdp" type="number" step="0.5"></label>
+            <label>Backup Penalty<input id="weightBackupPenalty" type="number" step="0.05"></label>
             <label>Position Windows<input id="weightPositionPreference" type="number" step="0.25"></label>
             <label>Favorite Teams<input id="weightFavoriteTeam" type="number" step="0.25"></label>
           </div>

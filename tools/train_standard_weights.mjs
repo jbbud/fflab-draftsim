@@ -9,16 +9,21 @@ const POSITIONS = ["QB", "RB", "WR", "TE", "K", "DEF"];
 const FLEX_POSITIONS = new Set(["RB", "WR", "TE"]);
 const FLEX_REPLACEMENT_SHARE = { RB: 0.5, WR: 0.5, TE: 0 };
 const BASELINE_WEIGHTS = {
-  vor: 100,
-  rank: 100,
-  adp: 100,
-  need: 20,
-  dropoff: 0.6,
-  handcuff: 1,
-  stack: 1,
+  vor: 200,
+  rank: 75.99,
+  adp: 63.38,
+  need: 34.68,
+  dropoff: 0.379,
+  handcuff: 0.56,
+  stack: 0.61,
+  backupPenalty: 1.58,
 };
 const ROSTER_SETTINGS = { QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 1, K: 1, DEF: 1, BENCH: 6 };
 const MAX_EXTRA = { QB: 1, RB: 4, WR: 4, TE: 1, K: 0, DEF: 0 };
+const BACKUP_SENSITIVE_POSITIONS = new Set(["QB", "TE"]);
+const PREFERRED_BENCH_DEPTH = { RB: 5, WR: 5 };
+const BACKUP_ROUND_THRESHOLD = { QB: 11, TE: 12 };
+const LEAGUE_SATURATION_THRESHOLD = { QB: { start: 14, target: 20 }, TE: { start: 14, target: 19 } };
 const WEIGHT_LIMITS = {
   vor: [25, 200],
   rank: [25, 200],
@@ -27,6 +32,7 @@ const WEIGHT_LIMITS = {
   dropoff: [0, 2.5],
   handcuff: [0, 8],
   stack: [0, 8],
+  backupPenalty: [0, 2.5],
 };
 const execFileAsync = promisify(execFile);
 
@@ -37,6 +43,14 @@ function number(value, fallback = 0) {
 
 function integer(value, fallback = 0) {
   return Math.trunc(number(value, fallback));
+}
+
+function boolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
 }
 
 function clamp(value, min, max) {
@@ -57,6 +71,10 @@ function parseArgs(argv) {
     survivors: 12,
     holdoutSeeds: 32,
     targetTeam: 0,
+    targetTeams: "",
+    targetTeamSampleRate: 0.3,
+    targetTeamSampleMin: 1,
+    fullHoldout: true,
     seedBase: 20260721,
     logSpread: 0.75,
     traceOut: "",
@@ -73,11 +91,26 @@ function parseArgs(argv) {
       index += 1;
     }
   }
-  for (const key of ["candidates", "seeds", "survivors", "holdoutSeeds", "targetTeam", "seedBase"]) {
+  for (const key of ["candidates", "seeds", "survivors", "holdoutSeeds", "targetTeam", "targetTeamSampleMin", "seedBase"]) {
     args[key] = integer(args[key], args[key]);
   }
   args.logSpread = number(args.logSpread, 0.75);
+  args.targetTeamSampleRate = number(args.targetTeamSampleRate, 0.3);
+  args.fullHoldout = boolean(args.fullHoldout, true);
   return args;
+}
+
+function parseTargetTeams(value, fallbackTargetTeam, numTeams) {
+  if (String(value || "").trim().toLowerCase() === "all") {
+    return Array.from({ length: numTeams }, (_, index) => index);
+  }
+  const rawValues = String(value || "").trim()
+    ? String(value).split(",")
+    : [String(fallbackTargetTeam)];
+  const teams = rawValues
+    .map((raw) => integer(raw.trim(), -1))
+    .filter((team) => team >= 0 && team < numTeams);
+  return [...new Set(teams)].sort((a, b) => a - b);
 }
 
 function rng(seed) {
@@ -307,6 +340,59 @@ function needTier(position, roster, session) {
   return openStarterSlots + Math.max(flexCapacity - flexUsed, 0) * flexWeight;
 }
 
+function rosterSurplusPenalty(player, roster, round, session) {
+  const position = String(player?.position || "");
+  if (!BACKUP_SENSITIVE_POSITIONS.has(position)) return 0;
+  const counts = rosterCounts(roster);
+  const starters = Math.max(integer(session.roster_settings[position], 0), 1);
+  const currentAtPosition = integer(counts[position], 0);
+  if (currentAtPosition < starters) return 0;
+  const threshold = BACKUP_ROUND_THRESHOLD[position] || 12;
+  const basePenalty = integer(round, 1) < threshold ? 70 : 35;
+  const rbWrShortage = Object.entries(PREFERRED_BENCH_DEPTH).reduce(
+    (sum, [pos, target]) => sum + Math.max(integer(target) - integer(counts[pos], 0), 0),
+    0
+  );
+  return basePenalty + rbWrShortage * 10 + Math.max(currentAtPosition - starters, 0) * 1000;
+}
+
+function roundMismatchPenalty(player, roster, round, session) {
+  const position = String(player?.position || "");
+  if (!BACKUP_SENSITIVE_POSITIONS.has(position)) return 0;
+  const counts = rosterCounts(roster);
+  const starters = Math.max(integer(session.roster_settings[position], 0), 1);
+  const currentRound = Math.max(integer(round, 1), 1);
+  const posRank = integer(player?.pos_rank, 99);
+  if (integer(counts[position], 0) >= starters) {
+    const threshold = BACKUP_ROUND_THRESHOLD[position] || 12;
+    return currentRound < threshold ? (threshold - currentRound) * 8 : 0;
+  }
+  if (position === "QB") {
+    if (currentRound <= 2) return posRank <= 1 ? 15 : 60;
+    if (currentRound <= 5) return posRank <= 3 ? 0 : 30;
+  }
+  if (position === "TE" && currentRound <= 3) return posRank <= 3 ? 0 : 45;
+  return 0;
+}
+
+function leagueSaturationPenalty(position, picks, playerMap) {
+  const window = LEAGUE_SATURATION_THRESHOLD[position];
+  if (!window) return 0;
+  const draftedCount = picks.reduce((sum, pick) => {
+    const draftedPlayer = playerMap.get(String(pick.player_id));
+    return sum + (draftedPlayer?.position === position ? 1 : 0);
+  }, 0);
+  if (draftedCount < window.start) return 0;
+  const progress = clamp((draftedCount - window.start + 1) / Math.max(window.target - window.start + 1, 1), 0, 1);
+  return 15 + Math.pow(progress, 1.4) * 55;
+}
+
+function backupPositionPenalty(player, roster, pick, session, picks, playerMap) {
+  return rosterSurplusPenalty(player, roster, pick.round, session)
+    + roundMismatchPenalty(player, roster, pick.round, session)
+    + leagueSaturationPenalty(player?.position, picks, playerMap);
+}
+
 function nextPickForTeam(slots, picks, teamIndex, afterOverall) {
   const picked = new Set(picks.map((pick) => integer(pick.overall)));
   return slots.find((slot) => integer(slot.current_team) === teamIndex && integer(slot.overall) > afterOverall && !picked.has(integer(slot.overall))) || null;
@@ -402,7 +488,7 @@ function softmaxSample(items, scoreFn, random, temperature = 8) {
   return items.at(-1) || null;
 }
 
-function chooseBotPick({ teamIndex, pick, rosters, candidates, weights, replacementByPosition, slots, picks, random, session, trace }) {
+function chooseBotPick({ teamIndex, pick, rosters, candidates, weights, replacementByPosition, slots, picks, random, session, playerMap, trace }) {
   const candidatePool = sortPlayers(candidates).slice(0, 40);
   const rawScores = candidatePool.map((player) => ({
     player_id: String(player.player_id),
@@ -424,6 +510,7 @@ function chooseBotPick({ teamIndex, pick, rosters, candidates, weights, replacem
     const rankVal = normalizeComponent.rank(raw.rank);
     const adpVal = normalizeComponent.adp(raw.adp);
     const timing = positionTimingMultiplier(player.position, pick.round);
+    const backupPenalty = backupPositionPenalty(player, roster, pick, session, picks, playerMap);
     const coreShare = untimedValueShare(player.position);
     const timedShare = 1 - coreShare;
     const coreValue = vorVal * weights.vor * coreShare + rankVal * weights.rank * coreShare + adpVal * weights.adp * coreShare;
@@ -435,6 +522,7 @@ function chooseBotPick({ teamIndex, pick, rosters, candidates, weights, replacem
       + stackBonus(player, roster) * weights.stack
       + rankVal * weights.rank * timedShare
       + adpVal * weights.adp * timedShare
+      - backupPenalty * weights.backupPenalty
     );
     const total = coreValue + timedValue * timing;
     if (trace) {
@@ -454,6 +542,8 @@ function chooseBotPick({ teamIndex, pick, rosters, candidates, weights, replacem
         dropoff: dropoffScore(player, candidates, teamIndex, pick, slots, picks),
         handcuff: handcuffBonus(player, roster),
         stack: stackBonus(player, roster),
+        backupPenalty,
+        backupPenaltyWeight: weights.backupPenalty,
         timing,
         coreValue,
         timedValue,
@@ -485,13 +575,14 @@ function runDraft(dataset, candidateWeights, seed, targetTeam, trace = null) {
   const drafted = new Set();
   const rosters = Array.from({ length: session.num_teams }, () => []);
   const replacementByPosition = replacementPointsByPosition(dataset.players, session);
+  const playerMap = new Map(dataset.players.map((player) => [String(player.player_id), player]));
   for (const pick of slots) {
     const teamIndex = pick.current_team;
     const roster = rosters[teamIndex] || [];
     const candidates = dataset.players.filter((player) => canAddPlayer(player, roster, drafted, session));
     if (!candidates.length) continue;
     const weights = teamIndex === targetTeam ? candidateWeights : BASELINE_WEIGHTS;
-    const player = chooseBotPick({ teamIndex, pick, rosters, candidates, weights, replacementByPosition, slots, picks, random, session, trace });
+    const player = chooseBotPick({ teamIndex, pick, rosters, candidates, weights, replacementByPosition, slots, picks, random, session, playerMap, trace });
     if (!player) continue;
     drafted.add(String(player.player_id));
     roster.push(player);
@@ -531,18 +622,52 @@ function rewardDraft(dataset, draft, targetTeam) {
   return weeks.reduce((sum, week) => sum + optimalLineup(draft.rosters[targetTeam] || [], week, scores, dataset.session), 0);
 }
 
-function evaluateWeights(dataset, weights, seeds, targetTeam) {
-  const rewards = seeds.map((seed) => rewardDraft(dataset, runDraft(dataset, weights, seed, targetTeam), targetTeam));
+function summarizeRewards(rewards) {
   const mean = rewards.reduce((sum, value) => sum + value, 0) / rewards.length;
   const variance = rewards.reduce((sum, value) => sum + Math.pow(value - mean, 2), 0) / rewards.length;
   return {
-    weights,
     mean,
     variance,
     stdev: Math.sqrt(variance),
     worst: Math.min(...rewards),
     best: Math.max(...rewards),
     rewards,
+  };
+}
+
+function evaluateWeightsForTeam(dataset, weights, seeds, targetTeam) {
+  const rewards = seeds.map((seed) => rewardDraft(dataset, runDraft(dataset, weights, seed, targetTeam), targetTeam));
+  return summarizeRewards(rewards);
+}
+
+function fullTargetTeamBatches(seeds, targetTeams) {
+  return seeds.map((seed, seedIndex) => ({
+    seed,
+    seed_index: seedIndex,
+    target_teams: targetTeams.slice(),
+  }));
+}
+
+function evaluateWeights(dataset, weights, seedBatches, targetTeams = null, onProgress = null) {
+  const batches = targetTeams ? fullTargetTeamBatches(seedBatches, targetTeams) : seedBatches;
+  const rewards = [];
+  const rewardsByTeam = new Map();
+  for (const batch of batches) {
+    for (const targetTeam of batch.target_teams) {
+      const reward = rewardDraft(dataset, runDraft(dataset, weights, batch.seed, targetTeam), targetTeam);
+      rewards.push(reward);
+      if (onProgress) onProgress();
+      if (!rewardsByTeam.has(targetTeam)) rewardsByTeam.set(targetTeam, []);
+      rewardsByTeam.get(targetTeam).push(reward);
+    }
+  }
+  const perTeamEntries = [...rewardsByTeam.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([targetTeam, teamRewards]) => [targetTeam, summarizeRewards(teamRewards)]);
+  return {
+    weights,
+    ...summarizeRewards(rewards),
+    per_team: Object.fromEntries(perTeamEntries),
   };
 }
 
@@ -560,29 +685,147 @@ function rankResults(results) {
   return results.slice().sort((a, b) => b.mean - a.mean || a.variance - b.variance || b.worst - a.worst);
 }
 
+function formatDuration(ms) {
+  const totalSeconds = Math.max(Math.round(number(ms, 0) / 1000), 0);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function batchEvaluationCount(seedBatches) {
+  return seedBatches.reduce((sum, batch) => sum + (batch.target_teams || []).length, 0);
+}
+
+function createProgressLogger(label, total) {
+  const startedAt = Date.now();
+  let completed = 0;
+  let lastLoggedAt = 0;
+  let lastLoggedCompleted = -1;
+  const safeTotal = Math.max(integer(total, 0), 1);
+
+  const log = (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastLoggedAt < 2000 && completed < safeTotal) return;
+    lastLoggedAt = now;
+    lastLoggedCompleted = completed;
+    const elapsed = now - startedAt;
+    const rate = completed > 0 ? completed / Math.max(elapsed / 1000, 0.001) : 0;
+    const remaining = Math.max(safeTotal - completed, 0);
+    const etaMs = rate > 0 ? (remaining / rate) * 1000 : 0;
+    const pct = ((completed / safeTotal) * 100).toFixed(1);
+    console.error(`[${label}] ${completed}/${safeTotal} evals (${pct}%) elapsed ${formatDuration(elapsed)} ETA ${formatDuration(etaMs)}`);
+  };
+
+  console.error(`[${label}] starting ${safeTotal} evals`);
+  return {
+    tick() {
+      completed += 1;
+      log(false);
+    },
+    done() {
+      completed = safeTotal;
+      if (lastLoggedCompleted !== safeTotal) log(true);
+    },
+  };
+}
+
+function evaluateWeightSet(dataset, weightsList, seedBatches, label) {
+  const progress = createProgressLogger(label, weightsList.length * batchEvaluationCount(seedBatches));
+  const results = [];
+  for (const weights of weightsList) {
+    results.push(evaluateWeights(dataset, weights, seedBatches, null, () => progress.tick()));
+  }
+  progress.done();
+  return rankResults(results);
+}
+
 function seedList(seedBase, count, offset = 0) {
   return Array.from({ length: count }, (_, index) => seedBase + offset + index * 9973);
+}
+
+function stageSeedSalt(stage) {
+  return String(stage).split("").reduce((sum, char) => sum + char.charCodeAt(0), 0) * 100003;
+}
+
+function targetTeamSampleSize(targetTeams, sampleRate, sampleMin) {
+  if (targetTeams.length === 0) return 0;
+  const requested = Math.ceil(targetTeams.length * clamp(number(sampleRate, 1), 0, 1));
+  const minimum = Math.max(integer(sampleMin, 1), 1);
+  return clamp(Math.max(requested, minimum), 1, targetTeams.length);
+}
+
+function sampleTargetTeams(targetTeams, sampleRate, sampleMin, seedBase, stage, seedIndex) {
+  const count = targetTeamSampleSize(targetTeams, sampleRate, sampleMin);
+  if (count >= targetTeams.length) return targetTeams.slice();
+  const random = rng(seedBase + stageSeedSalt(stage) + seedIndex * 1009);
+  return targetTeams
+    .map((team) => ({ team, roll: random() }))
+    .sort((a, b) => a.roll - b.roll || a.team - b.team)
+    .slice(0, count)
+    .map((entry) => entry.team)
+    .sort((a, b) => a - b);
+}
+
+function targetTeamBatches(seeds, targetTeams, { sampleRate = 1, sampleMin = 1, seedBase = 0, stage = "stage" } = {}) {
+  return seeds.map((seed, seedIndex) => ({
+    seed,
+    seed_index: seedIndex,
+    target_teams: sampleTargetTeams(targetTeams, sampleRate, sampleMin, seedBase, stage, seedIndex),
+  }));
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const dataset = await loadDataset(args.data, { demo: Boolean(args.demo) });
+  const targetTeams = parseTargetTeams(args.targetTeams, args.targetTeam, dataset.session.num_teams);
+  if (targetTeams.length === 0) throw new Error("No valid target teams selected.");
   const searchRandom = rng(args.seedBase);
   const stageOneSeeds = seedList(args.seedBase, args.seeds);
   const stageTwoSeeds = seedList(args.seedBase, Math.max(args.seeds * 3, args.seeds + 1), 100000);
   const holdoutSeeds = seedList(args.seedBase, args.holdoutSeeds, 500000);
+  const stageOneTargetTeamBatches = targetTeamBatches(stageOneSeeds, targetTeams, {
+    sampleRate: args.targetTeamSampleRate,
+    sampleMin: args.targetTeamSampleMin,
+    seedBase: args.seedBase,
+    stage: "stage_one",
+  });
+  const stageTwoTargetTeamBatches = targetTeamBatches(stageTwoSeeds, targetTeams, {
+    sampleRate: args.targetTeamSampleRate,
+    sampleMin: args.targetTeamSampleMin,
+    seedBase: args.seedBase,
+    stage: "stage_two",
+  });
+  const holdoutTargetTeamBatches = args.fullHoldout
+    ? fullTargetTeamBatches(holdoutSeeds, targetTeams)
+    : targetTeamBatches(holdoutSeeds, targetTeams, {
+      sampleRate: args.targetTeamSampleRate,
+      sampleMin: args.targetTeamSampleMin,
+      seedBase: args.seedBase,
+      stage: "holdout",
+    });
   const candidates = [
     BASELINE_WEIGHTS,
     ...Array.from({ length: args.candidates }, () => sampleWeights(searchRandom, args.logSpread)),
   ];
-  const stageOne = rankResults(candidates.map((weights) => evaluateWeights(dataset, weights, stageOneSeeds, args.targetTeam)));
+  const stageOne = evaluateWeightSet(dataset, candidates, stageOneTargetTeamBatches, "stage 1");
   const survivors = stageOne.slice(0, Math.max(1, Math.min(args.survivors, stageOne.length))).map((result) => result.weights);
-  const stageTwo = rankResults(survivors.map((weights) => evaluateWeights(dataset, weights, stageTwoSeeds, args.targetTeam)));
-  const baselineHoldout = evaluateWeights(dataset, BASELINE_WEIGHTS, holdoutSeeds, args.targetTeam);
-  const bestHoldout = evaluateWeights(dataset, stageTwo[0].weights, holdoutSeeds, args.targetTeam);
+  const stageTwo = evaluateWeightSet(dataset, survivors, stageTwoTargetTeamBatches, "stage 2");
+  const holdoutProgress = createProgressLogger("holdout", 2 * batchEvaluationCount(holdoutTargetTeamBatches));
+  const baselineHoldout = evaluateWeights(dataset, BASELINE_WEIGHTS, holdoutTargetTeamBatches, null, () => holdoutProgress.tick());
+  const bestHoldout = evaluateWeights(dataset, stageTwo[0].weights, holdoutTargetTeamBatches, null, () => holdoutProgress.tick());
+  holdoutProgress.done();
   const report = {
-    objective: "target team projected optimal-lineup season points",
-    target_team: args.targetTeam,
+    objective: "selected target teams projected optimal-lineup season points",
+    target_team: targetTeams.length === 1 ? targetTeams[0] : null,
+    target_teams: targetTeams,
+    target_team_sample_rate: args.targetTeamSampleRate,
+    target_team_sample_min: args.targetTeamSampleMin,
+    stage_one_target_team_batches: stageOneTargetTeamBatches,
+    stage_two_target_team_batches: stageTwoTargetTeamBatches,
+    full_holdout: args.fullHoldout,
     dataset: dataset.source,
     candidate_count: candidates.length,
     stage_one_seed_count: stageOneSeeds.length,
@@ -596,11 +839,13 @@ async function main() {
   if (args.traceOut) {
     const trace = [];
     trace.seed = holdoutSeeds[0];
-    const tracedDraft = runDraft(dataset, bestHoldout.weights, holdoutSeeds[0], args.targetTeam, trace);
+    const traceTargetTeam = targetTeams[0];
+    const tracedDraft = runDraft(dataset, bestHoldout.weights, holdoutSeeds[0], traceTargetTeam, trace);
     await writeFile(resolve(args.traceOut), `${JSON.stringify({
       seed: holdoutSeeds[0],
+      target_team: traceTargetTeam,
       weights: bestHoldout.weights,
-      reward: rewardDraft(dataset, tracedDraft, args.targetTeam),
+      reward: rewardDraft(dataset, tracedDraft, traceTargetTeam),
       picks: trace,
     }, null, 2)}\n`, "utf8");
   }
