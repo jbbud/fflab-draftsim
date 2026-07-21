@@ -186,8 +186,12 @@ The score-weight editor lets you pick a team and tune:
 - `Stack`
 - `Rank`
 - `ADP`
+- `Position Windows`
+- `Favorite Teams`
 
 VOR, rank, and ADP are normalized per bot pick with median/IQR scaling before weights are applied. This keeps equal weights roughly comparable while still allowing elite VOR outliers to matter.
+
+Position-window and favorite-team preference weights default to zero, so those preference sections do not affect mock drafts unless you opt a team into them.
 
 Kickers and defenses are timing-discounted against round 15. QB, RB, WR, and TE do not use a position start-round discount.
 
@@ -276,11 +280,36 @@ Use the GUI buttons:
 
 ```powershell
 node --check src/fflab/static/app.js
+node --check tools/train_standard_weights.mjs
 python -m pytest -q
 python -m compileall -q src api run_gui.py
 ```
 
 On some Windows setups, pytest may warn that it cannot write `.pytest_cache`. That warning does not mean the tests failed.
+
+## Training Bot Weights
+
+The first-pass weight trainer is a dependency-free Node script:
+
+```powershell
+node tools/train_standard_weights.mjs --candidates 96 --seeds 12 --survivors 16 --holdout-seeds 48 --out weight-report.json --trace-out pick-trace.json
+```
+
+By default, the script loads `.env` and syncs the league referenced by `LEAGUE_ID`, `YEAR`, `WEEK_START`, `WEEK_END`, `ESPN_S2`, and `SWID`, using the same server-side credential flow as the GUI. Use `--data export.json` to train from a browser export instead, or `--demo` for an offline synthetic smoke run.
+
+The harness tunes only the seven standard scorer weights:
+
+- `vor`
+- `rank`
+- `adp`
+- `need`
+- `dropoff`
+- `handcuff`
+- `stack`
+
+It does not train the `Position Windows` or `Favorite Teams` preference weights; those stay user-controlled and default to zero. It evaluates candidate weights for one target team against baseline-weight opponents using seeded random search plus successive halving. The first objective is projected optimal-lineup season points for the target team, with a holdout seed set reported separately from tuning seeds.
+
+Use `--trace-out` to write the promoted candidate's pick-level score breakdown, including VOR, rank, ADP, need, dropoff, handcuff, stack, timing, and selected player details.
 
 ## Troubleshooting
 

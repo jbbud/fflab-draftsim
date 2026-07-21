@@ -92,6 +92,7 @@ def test_gui_config_includes_safe_env_defaults_without_credentials(monkeypatch) 
 def test_static_assets_include_dexie_schema_and_offline_logic() -> None:
     app = Path("src/fflab/static/app.js").read_text(encoding="utf-8")
     dexie = Path("src/fflab/static/dexie.min.js").read_text(encoding="utf-8")
+    trainer = Path("tools/train_standard_weights.mjs").read_text(encoding="utf-8")
 
     assert 'new Dexie("fflab_draftsim")' in app
     assert "weekly_projections" in app
@@ -136,6 +137,22 @@ def test_static_assets_include_dexie_schema_and_offline_logic() -> None:
     assert "score_weights_by_team" in app
     assert "scoreWeightsForTeam" in app
     assert "saveScoreWeightInputs" in app
+    assert "position_preferences_by_team" in app
+    assert "positionPreferencePositions" in app
+    assert '["QB", "TE", "K", "DEF"]' in app
+    assert "normalizePositionPreferencesByTeam" in app
+    assert "positionPreferencesForTeam" in app
+    assert "positionPreferenceAdjustment" in app
+    assert "positionPreferenceMaxAdjustment" in app
+    assert "savePositionPreferenceInputs" in app
+    assert "favorite_nfl_teams_by_team" in app
+    assert "favoriteNflTeamsForTeam" in app
+    assert "favoriteTeamAdjustment" in app
+    assert "favoriteTeamScoreBonus" in app
+    assert "saveFavoriteTeamInputs" in app
+    assert 'team !== "NONE"' in app
+    assert "positionPreferenceWeight" in app
+    assert "favoriteTeamWeight" in app
     assert "nextPickForTeam" in app
     assert "state.slots.find" in app
     assert "positionTimingMultiplier" in app
@@ -175,10 +192,27 @@ def test_static_assets_include_dexie_schema_and_offline_logic() -> None:
     assert 'id="testTrade"' in web.HTML
     assert 'id="startDraft"' in web.HTML
     assert 'id="boardCount"' in web.HTML
+    assert 'class="nav-actions"' in web.HTML
+    assert 'class="nav-select">Your Team<select id="humanTeam"' in web.HTML
     assert 'id="newDraft" class="nav-action"' in web.HTML
     assert 'id="scoreWeightTeam"' in web.HTML
     assert 'id="saveScoreWeights"' in web.HTML
     assert 'id="weightVor"' in web.HTML
+    assert 'id="weightPositionPreference"' in web.HTML
+    assert 'id="weightFavoriteTeam"' in web.HTML
+    assert "Draft Intel Position Windows" in web.HTML
+    assert 'id="prefQbFirstEarliest"' in web.HTML
+    assert 'id="prefTeBackupLatest"' in web.HTML
+    assert 'id="prefKFirstLatest"' in web.HTML
+    assert 'id="prefDefBackupEarliest"' in web.HTML
+    assert 'id="savePositionPreferences"' in web.HTML
+    assert 'id="resetPositionPreferences"' in web.HTML
+    assert "Favorite NFL Teams" in web.HTML
+    assert 'id="favoriteNflTeams"' in web.HTML
+    assert 'class="favorite-team-grid"' in web.HTML
+    assert 'multiple size="8"' not in web.HTML
+    assert 'id="saveFavoriteTeams"' in web.HTML
+    assert 'id="resetFavoriteTeams"' in web.HTML
     assert 'id="teamNames"' not in web.HTML
     assert "Team Names" not in web.HTML
     assert 'id="qbStart"' not in web.HTML
@@ -194,5 +228,29 @@ def test_static_assets_include_dexie_schema_and_offline_logic() -> None:
     assert ".clock-actions" in css
     assert ".playoff-section" in css
     assert ".weight-grid" in css
+    assert "repeat(9" in css
+    assert ".position-preferences" in css
+    assert ".preference-grid" in css
+    assert ".favorite-teams" in css
+    assert ".favorite-team-grid" in css
+    assert "repeat(8" in css
+    assert ".nav-actions" in css
     assert ".nav-action" in css
+    assert ".nav-select" in css
     assert ".grid.four" not in css
+
+    assert "BASELINE_WEIGHTS" in trainer
+    assert "positionPreference" not in trainer
+    assert "favoriteTeam" not in trainer
+    assert "syncEnvLeaguePayload" in trainer
+    assert "payload_with_env_credentials" in trainer
+    assert "ESPN league from .env" in trainer
+    assert "demoPayload" in trainer
+    assert "evaluateWeights" in trainer
+    assert "sampleWeights" in trainer
+    assert "stageOne" in trainer
+    assert "stageTwo" in trainer
+    assert "traceOut" in trainer
+    assert "selected_player_name" in trainer
+    assert "holdout_mean_delta" in trainer
+    assert "target team projected optimal-lineup season points" in trainer

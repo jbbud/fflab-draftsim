@@ -40,8 +40,12 @@ DEFAULT_GUI_CONFIG: dict[str, Any] = {
         "stack": 1,
         "rank": 100,
         "adp": 100,
+        "positionPreference": 0,
+        "favoriteTeam": 0,
     },
     "score_weights_by_team": {},
+    "position_preferences_by_team": {},
+    "favorite_nfl_teams_by_team": {},
     "playoff_team_count": 6,
     "playoff_bye_count": 2,
     "human_team_index": 0,
@@ -75,7 +79,10 @@ HTML = """<!doctype html>
       <button class="tab-button" type="button" data-tab="setupTab">Draft Setup</button>
       <button class="tab-button" type="button" data-tab="tradingTab">Pick Trading</button>
       <button class="tab-button" type="button" data-tab="rostersTab">Rosters</button>
-      <button id="newDraft" class="nav-action" type="button">New Draft Board</button>
+      <div class="nav-actions">
+        <label class="nav-select">Your Team<select id="humanTeam"></select></label>
+        <button id="newDraft" class="nav-action" type="button">New Draft Board</button>
+      </div>
     </nav>
     <section id="tabPanels" class="tab-panels hidden">
       <section id="projectionTab" class="tab-panel hidden">
@@ -97,10 +104,7 @@ HTML = """<!doctype html>
       </section>
       <section id="setupTab" class="tab-panel hidden">
         <h2>Draft Setup</h2>
-        <div class="grid two">
-          <label>Teams<input id="numTeams" inputmode="numeric"></label>
-          <label>Your Team<select id="humanTeam"></select></label>
-        </div>
+        <label class="short-field">Teams<input id="numTeams" inputmode="numeric"></label>
         <div class="grid two">
           <label>Playoff Teams<input id="playoffTeams" inputmode="numeric"></label>
           <label>First-Round Byes<input id="playoffByes" inputmode="numeric"></label>
@@ -116,10 +120,58 @@ HTML = """<!doctype html>
             <label>Stack<input id="weightStack" type="number" step="0.25"></label>
             <label>Rank<input id="weightRank" type="number" step="0.5"></label>
             <label>ADP<input id="weightAdp" type="number" step="0.5"></label>
+            <label>Position Windows<input id="weightPositionPreference" type="number" step="0.25"></label>
+            <label>Favorite Teams<input id="weightFavoriteTeam" type="number" step="0.25"></label>
           </div>
           <div class="grid two">
             <button id="saveScoreWeights" type="button" class="secondary">Save Team Weights</button>
             <button id="resetScoreWeights" type="button" class="secondary">Reset Team Weights</button>
+          </div>
+        </section>
+        <section class="position-preferences">
+          <h3>Draft Intel Position Windows</h3>
+          <div class="preference-grid preference-head">
+            <span>Pos</span><span>First Earliest</span><span>First Latest</span><span>Backup Earliest</span><span>Backup Latest</span>
+          </div>
+          <div class="preference-grid">
+            <strong>QB</strong>
+            <input id="prefQbFirstEarliest" type="number" min="1" step="1">
+            <input id="prefQbFirstLatest" type="number" min="1" step="1">
+            <input id="prefQbBackupEarliest" type="number" min="1" step="1">
+            <input id="prefQbBackupLatest" type="number" min="1" step="1">
+          </div>
+          <div class="preference-grid">
+            <strong>TE</strong>
+            <input id="prefTeFirstEarliest" type="number" min="1" step="1">
+            <input id="prefTeFirstLatest" type="number" min="1" step="1">
+            <input id="prefTeBackupEarliest" type="number" min="1" step="1">
+            <input id="prefTeBackupLatest" type="number" min="1" step="1">
+          </div>
+          <div class="preference-grid">
+            <strong>K</strong>
+            <input id="prefKFirstEarliest" type="number" min="1" step="1">
+            <input id="prefKFirstLatest" type="number" min="1" step="1">
+            <input id="prefKBackupEarliest" type="number" min="1" step="1">
+            <input id="prefKBackupLatest" type="number" min="1" step="1">
+          </div>
+          <div class="preference-grid">
+            <strong>DEF</strong>
+            <input id="prefDefFirstEarliest" type="number" min="1" step="1">
+            <input id="prefDefFirstLatest" type="number" min="1" step="1">
+            <input id="prefDefBackupEarliest" type="number" min="1" step="1">
+            <input id="prefDefBackupLatest" type="number" min="1" step="1">
+          </div>
+          <div class="grid two">
+            <button id="savePositionPreferences" type="button" class="secondary">Save Position Windows</button>
+            <button id="resetPositionPreferences" type="button" class="secondary">Reset Position Windows</button>
+          </div>
+        </section>
+        <section class="favorite-teams">
+          <h3>Favorite NFL Teams</h3>
+          <div id="favoriteNflTeams" class="favorite-team-grid" role="group" aria-label="Favorite NFL teams"></div>
+          <div class="grid two">
+            <button id="saveFavoriteTeams" type="button" class="secondary">Save Favorite Teams</button>
+            <button id="resetFavoriteTeams" type="button" class="secondary">Reset Favorite Teams</button>
           </div>
         </section>
       </section>

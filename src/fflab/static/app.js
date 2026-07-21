@@ -35,6 +35,36 @@
   const replacementFlexShareByPosition = { RB: 0.5, WR: 0.5, TE: 0 };
   const scoreWeightUnitVersion = "normalized-v1";
   const legacyVorWeightScale = 20;
+  const positionPreferencePositions = ["QB", "TE", "K", "DEF"];
+  const positionPreferenceFields = ["first_earliest", "first_latest", "backup_earliest", "backup_latest"];
+  const positionPreferenceInputIds = {
+    QB: {
+      first_earliest: "prefQbFirstEarliest",
+      first_latest: "prefQbFirstLatest",
+      backup_earliest: "prefQbBackupEarliest",
+      backup_latest: "prefQbBackupLatest",
+    },
+    TE: {
+      first_earliest: "prefTeFirstEarliest",
+      first_latest: "prefTeFirstLatest",
+      backup_earliest: "prefTeBackupEarliest",
+      backup_latest: "prefTeBackupLatest",
+    },
+    K: {
+      first_earliest: "prefKFirstEarliest",
+      first_latest: "prefKFirstLatest",
+      backup_earliest: "prefKBackupEarliest",
+      backup_latest: "prefKBackupLatest",
+    },
+    DEF: {
+      first_earliest: "prefDefFirstEarliest",
+      first_latest: "prefDefFirstLatest",
+      backup_earliest: "prefDefBackupEarliest",
+      backup_latest: "prefDefBackupLatest",
+    },
+  };
+  const positionPreferenceMaxAdjustment = 24;
+  const favoriteTeamScoreBonus = 8;
   const defaultScoreWeights = {
     vor: number(defaultConfig.score_weights?.vor, 25),
     need: number(defaultConfig.score_weights?.need, 20),
@@ -43,6 +73,8 @@
     stack: number(defaultConfig.score_weights?.stack, 1),
     rank: number(defaultConfig.score_weights?.rank, 25),
     adp: number(defaultConfig.score_weights?.adp, 25),
+    positionPreference: number(defaultConfig.score_weights?.positionPreference, 0),
+    favoriteTeam: number(defaultConfig.score_weights?.favoriteTeam, 0),
   };
   const scoreWeightFields = [
     { key: "vor", inputId: "weightVor" },
@@ -52,6 +84,8 @@
     { key: "stack", inputId: "weightStack" },
     { key: "rank", inputId: "weightRank" },
     { key: "adp", inputId: "weightAdp" },
+    { key: "positionPreference", inputId: "weightPositionPreference" },
+    { key: "favoriteTeam", inputId: "weightFavoriteTeam" },
   ];
 
   // Escape dynamic text before injecting it into table or roster markup.
@@ -192,6 +226,56 @@
     return normalized;
   }
 
+  // Keep only QB/TE/K/DEF Draft Intel windows with positive round values.
+  function normalizePositionPreferences(preferences = {}) {
+    const normalized = {};
+    for (const position of positionPreferencePositions) {
+      normalized[position] = {};
+      for (const field of positionPreferenceFields) {
+        const value = integer(preferences?.[position]?.[field], 0);
+        normalized[position][field] = value > 0 ? value : null;
+      }
+      for (const prefix of ["first", "backup"]) {
+        const earliestKey = `${prefix}_earliest`;
+        const latestKey = `${prefix}_latest`;
+        const earliest = normalized[position][earliestKey];
+        const latest = normalized[position][latestKey];
+        if (earliest != null && latest != null && earliest > latest) {
+          normalized[position][earliestKey] = latest;
+          normalized[position][latestKey] = earliest;
+        }
+      }
+    }
+    return normalized;
+  }
+
+  // Keep per-team Draft Intel windows aligned to active team indexes.
+  function normalizePositionPreferencesByTeam(preferencesByTeam = {}, numTeams = 0) {
+    const normalized = {};
+    for (let index = 0; index < numTeams; index += 1) {
+      normalized[index] = normalizePositionPreferences(preferencesByTeam?.[index]);
+    }
+    return normalized;
+  }
+
+  // Normalize favorite NFL team abbreviations for one fantasy team.
+  function normalizeFavoriteNflTeams(teams = []) {
+    const values = Array.isArray(teams) ? teams : [];
+    return [...new Set(values
+      .map((team) => String(team || "").trim().toUpperCase())
+      .filter((team) => team && team !== "NONE"))]
+      .sort((a, b) => a.localeCompare(b));
+  }
+
+  // Keep per-team favorite NFL team lists aligned to active team indexes.
+  function normalizeFavoriteNflTeamsByTeam(teamsByTeam = {}, numTeams = 0) {
+    const normalized = {};
+    for (let index = 0; index < numTeams; index += 1) {
+      normalized[index] = normalizeFavoriteNflTeams(teamsByTeam?.[index]);
+    }
+    return normalized;
+  }
+
   // Convert saved raw-VOR score weights into normalized score units once.
   function migrateScoreWeightUnits(session) {
     if (!session || session.score_weight_units === scoreWeightUnitVersion) return { session, changed: false };
@@ -285,6 +369,14 @@
         overrides.score_weights_by_team || defaultConfig.score_weights_by_team || {},
         numTeams
       ),
+      position_preferences_by_team: normalizePositionPreferencesByTeam(
+        overrides.position_preferences_by_team || defaultConfig.position_preferences_by_team || {},
+        numTeams
+      ),
+      favorite_nfl_teams_by_team: normalizeFavoriteNflTeamsByTeam(
+        overrides.favorite_nfl_teams_by_team || defaultConfig.favorite_nfl_teams_by_team || {},
+        numTeams
+      ),
       playoff_team_count: playoffTeams,
       playoff_bye_count: playoffByes,
       human_team_index: integer(overrides.human_team_index ?? defaultConfig.human_team_index, 0),
@@ -307,6 +399,8 @@
       num_teams: numTeams,
       team_names: names,
       teams: teamsWithResolvedNames(useSyncedNames ? sourceSession : { teams: [] }, names),
+      position_preferences_by_team: normalizePositionPreferencesByTeam(sourceSession.position_preferences_by_team || {}, numTeams),
+      favorite_nfl_teams_by_team: normalizeFavoriteNflTeamsByTeam(sourceSession.favorite_nfl_teams_by_team || {}, numTeams),
       human_team_index: clamp(integer(sourceSession.human_team_index, 0), 0, Math.max(numTeams - 1, 0)),
     };
   }
@@ -446,6 +540,16 @@
     return normalizeScoreWeights(session?.score_weights_by_team?.[teamIndex]);
   }
 
+  // Return Draft Intel position windows for one team.
+  function positionPreferencesForTeam(teamIndex, session = state.session) {
+    return normalizePositionPreferences(session?.position_preferences_by_team?.[teamIndex]);
+  }
+
+  // Return favorite NFL teams for one mock drafter.
+  function favoriteNflTeamsForTeam(teamIndex, session = state.session) {
+    return normalizeFavoriteNflTeams(session?.favorite_nfl_teams_by_team?.[teamIndex]);
+  }
+
   // Read the score-weight editor controls into a normalized weight object.
   function readScoreWeightInputs() {
     const weights = {};
@@ -489,6 +593,111 @@
     setStatus(`Reset score weights for ${teamName(teamIndex)}.`);
   }
 
+  // Read the Draft Intel position-window editor into normalized preferences.
+  function readPositionPreferenceInputs() {
+    const preferences = {};
+    for (const position of positionPreferencePositions) {
+      preferences[position] = {};
+      for (const field of positionPreferenceFields) {
+        const value = integer($(positionPreferenceInputIds[position][field]).value, 0);
+        preferences[position][field] = value > 0 ? value : null;
+      }
+    }
+    return normalizePositionPreferences(preferences);
+  }
+
+  // Write one team's Draft Intel position windows into the editor.
+  function writePositionPreferenceInputs() {
+    const teamIndex = selectedScoreWeightTeamIndex();
+    const preferences = positionPreferencesForTeam(teamIndex);
+    for (const position of positionPreferencePositions) {
+      for (const field of positionPreferenceFields) {
+        $(positionPreferenceInputIds[position][field]).value = preferences[position][field] || "";
+      }
+    }
+  }
+
+  // Persist the current Draft Intel position windows for the selected team.
+  async function savePositionPreferenceInputs({ announce = true } = {}) {
+    const teamIndex = selectedScoreWeightTeamIndex();
+    const positionPreferencesByTeam = normalizePositionPreferencesByTeam(
+      state.session?.position_preferences_by_team || {},
+      integer(state.session?.num_teams, 0)
+    );
+    positionPreferencesByTeam[teamIndex] = readPositionPreferenceInputs();
+    await saveSession({ ...state.session, position_preferences_by_team: positionPreferencesByTeam });
+    if (announce) setStatus(`Saved position windows for ${teamName(teamIndex)}.`);
+  }
+
+  // Clear Draft Intel position windows for the selected team.
+  async function resetPositionPreferenceInputs() {
+    const teamIndex = selectedScoreWeightTeamIndex();
+    const positionPreferencesByTeam = normalizePositionPreferencesByTeam(
+      state.session?.position_preferences_by_team || {},
+      integer(state.session?.num_teams, 0)
+    );
+    positionPreferencesByTeam[teamIndex] = normalizePositionPreferences();
+    await saveSession({ ...state.session, position_preferences_by_team: positionPreferencesByTeam });
+    writePositionPreferenceInputs();
+    setStatus(`Reset position windows for ${teamName(teamIndex)}.`);
+  }
+
+  // Build favorite-team options from cached player NFL team abbreviations.
+  function availableNflTeams() {
+    return [...new Set(state.players
+      .map((player) => String(player.pro_team || "").trim().toUpperCase())
+      .filter((team) => team && team !== "NONE"))]
+      .sort((a, b) => a.localeCompare(b));
+  }
+
+  // Refresh favorite-team choices from the current player cache.
+  function refreshFavoriteNflTeamOptions() {
+    const selected = new Set(Array.from(document.querySelectorAll("[data-favorite-nfl-team]:checked")).map((input) => input.value));
+    $("favoriteNflTeams").innerHTML = availableNflTeams()
+      .map((team) => `<label class="favorite-team-option"><input data-favorite-nfl-team type="checkbox" value="${escapeHtml(team)}" ${selected.has(team) ? "checked" : ""}>${escapeHtml(team)}</label>`)
+      .join("");
+  }
+
+  // Read selected favorite NFL teams for the active mock drafter.
+  function readFavoriteTeamInputs() {
+    return normalizeFavoriteNflTeams(Array.from(document.querySelectorAll("[data-favorite-nfl-team]:checked")).map((input) => input.value));
+  }
+
+  // Write one mock drafter's favorite NFL teams into the multi-select.
+  function writeFavoriteTeamInputs() {
+    const teamIndex = selectedScoreWeightTeamIndex();
+    const favorites = new Set(favoriteNflTeamsForTeam(teamIndex));
+    refreshFavoriteNflTeamOptions();
+    for (const input of document.querySelectorAll("[data-favorite-nfl-team]")) {
+      input.checked = favorites.has(input.value);
+    }
+  }
+
+  // Persist favorite NFL teams for the selected mock drafter.
+  async function saveFavoriteTeamInputs({ announce = true } = {}) {
+    const teamIndex = selectedScoreWeightTeamIndex();
+    const favoritesByTeam = normalizeFavoriteNflTeamsByTeam(
+      state.session?.favorite_nfl_teams_by_team || {},
+      integer(state.session?.num_teams, 0)
+    );
+    favoritesByTeam[teamIndex] = readFavoriteTeamInputs();
+    await saveSession({ ...state.session, favorite_nfl_teams_by_team: favoritesByTeam });
+    if (announce) setStatus(`Saved favorite NFL teams for ${teamName(teamIndex)}.`);
+  }
+
+  // Clear favorite NFL teams for the selected mock drafter.
+  async function resetFavoriteTeamInputs() {
+    const teamIndex = selectedScoreWeightTeamIndex();
+    const favoritesByTeam = normalizeFavoriteNflTeamsByTeam(
+      state.session?.favorite_nfl_teams_by_team || {},
+      integer(state.session?.num_teams, 0)
+    );
+    favoritesByTeam[teamIndex] = [];
+    await saveSession({ ...state.session, favorite_nfl_teams_by_team: favoritesByTeam });
+    writeFavoriteTeamInputs();
+    setStatus(`Reset favorite NFL teams for ${teamName(teamIndex)}.`);
+  }
+
   // Read draft setup controls into a normalized session object.
   function readSetupInputs() {
     const numTeams = Math.max(integer($("numTeams").value, state.session.num_teams), 2);
@@ -514,6 +723,20 @@
         },
         numTeams
       ),
+      position_preferences_by_team: normalizePositionPreferencesByTeam(
+        {
+          ...(state.session.position_preferences_by_team || {}),
+          [selectedScoreWeightTeamIndex()]: readPositionPreferenceInputs(),
+        },
+        numTeams
+      ),
+      favorite_nfl_teams_by_team: normalizeFavoriteNflTeamsByTeam(
+        {
+          ...(state.session.favorite_nfl_teams_by_team || {}),
+          [selectedScoreWeightTeamIndex()]: readFavoriteTeamInputs(),
+        },
+        numTeams
+      ),
       human_team_index: Math.max(Math.min(integer($("humanTeam").value, state.session.human_team_index), numTeams - 1), 0),
       playoff_team_count: playoffTeams,
       playoff_bye_count: playoffByes,
@@ -530,6 +753,8 @@
     refreshTradeTeamOptions();
     $("humanTeam").value = String(integer(session.human_team_index, 0));
     writeScoreWeightInputs();
+    writePositionPreferenceInputs();
+    writeFavoriteTeamInputs();
   }
 
   // Write the active projection sync settings into the sync form controls.
@@ -1029,6 +1254,49 @@ function untimedValueShare(position) {
   return position === "K" || position === "DEF" ? 0 : 0.5;
 }
 
+// Determine whether this pick would fill starter inventory or backup inventory.
+function positionPreferenceStage(position, counts) {
+  const starters = Math.max(integer(state.session?.roster_settings?.[position], 0), 1);
+  return integer(counts?.[position], 0) < starters ? "first" : "backup";
+}
+
+// Convert one configured window into a small smooth score nudge.
+function positionWindowAdjustment(window, round) {
+  const earliest = window.earliest;
+  const latest = window.latest;
+  if (earliest != null && round < earliest) {
+    const distance = clamp((earliest - round) / 3, 0, 1);
+    return -positionPreferenceMaxAdjustment * Math.pow(distance, 1.25);
+  }
+  if (latest != null && round > latest) {
+    const distance = clamp((round - latest) / 3, 0, 1);
+    return positionPreferenceMaxAdjustment * Math.pow(distance, 1.1);
+  }
+  return 0;
+}
+
+// Softly nudge a bot toward or away from QB/TE/K/DEF Draft Intel windows.
+function positionPreferenceAdjustment(teamIndex, player, pick, roster) {
+  const position = String(player?.position || "");
+  if (!positionPreferencePositions.includes(position)) return 0;
+
+  const preferences = positionPreferencesForTeam(teamIndex);
+  const counts = rosterCounts(roster);
+  const stage = positionPreferenceStage(position, counts);
+  const positionPrefs = preferences[position] || {};
+  return positionWindowAdjustment({
+    earliest: positionPrefs[`${stage}_earliest`],
+    latest: positionPrefs[`${stage}_latest`],
+  }, Math.max(integer(pick?.round, 1), 1));
+}
+
+// Add a small bonus when a mock drafter favors the player's NFL team.
+function favoriteTeamAdjustment(teamIndex, player) {
+  const proTeam = String(player?.pro_team || "").trim().toUpperCase();
+  if (!proTeam) return 0;
+  return favoriteNflTeamsForTeam(teamIndex).includes(proTeam) ? favoriteTeamScoreBonus : 0;
+}
+
 // Randomly sample from scored candidates while favoring higher scores.
 function softmaxSample(items, scoreFn, temperature = 8) {
   // high temperature indicates more randomness, low temperature indicates more deterministic behavior.
@@ -1143,6 +1411,8 @@ function chooseBotPick(teamIndex) {
     const adpValRaw = rawComponents.adp;
     const adpVal = normalizeComponent.adp(adpValRaw);
     const timing = positionTimingMultiplier(player.position, pick.round);
+    const positionPreference = positionPreferenceAdjustment(teamIndex, player, pick, roster);
+    const favoriteTeam = favoriteTeamAdjustment(teamIndex, player);
     const coreShare = untimedValueShare(player.position);
     const timedShare = 1 - coreShare;
     const coreValue = (
@@ -1158,6 +1428,8 @@ function chooseBotPick(teamIndex) {
       + stack * weights.stack
       + rankVal * weights.rank * timedShare
       + adpVal * weights.adp * timedShare
+      + positionPreference * weights.positionPreference
+      + favoriteTeam * weights.favoriteTeam
     );
 
     const score = coreValue + timedValue * timing;
@@ -1180,6 +1452,10 @@ function chooseBotPick(teamIndex) {
         adpValRaw: adpValRaw,
         adpVal: adpVal,
         timing: timing,
+        positionPreference: positionPreference,
+        favoriteTeam: favoriteTeam,
+        positionPreferenceWeight: weights.positionPreference,
+        favoriteTeamWeight: weights.favoriteTeam,
         //coreShare: coreShare,
         coreValue: coreValue,
         timedValue: timedValue,
@@ -1856,6 +2132,8 @@ function chooseBotPick(teamIndex) {
       projection_meta: payload.projection_meta || {},
       draft_started: false,
       score_weights_by_team: state.session?.score_weights_by_team || {},
+      position_preferences_by_team: state.session?.position_preferences_by_team || {},
+      favorite_nfl_teams_by_team: state.session?.favorite_nfl_teams_by_team || {},
       source,
     });
     await clearTables(["players", "weekly_projections", "league_schedule", "draft_slots", "pick_trades", "draft_picks"]);
@@ -2307,6 +2585,7 @@ function chooseBotPick(teamIndex) {
     renderSyncMeta();
     renderOnlineStatus();
     refreshTradeTeamOptions();
+    writeFavoriteTeamInputs();
     renderClock();
     renderAvailable();
     renderCurrentRoster();
@@ -2350,9 +2629,17 @@ function chooseBotPick(teamIndex) {
     $("saveTrade").addEventListener("click", saveTrade);
     $("playoffTeams").addEventListener("change", savePlayoffSettings);
     $("playoffByes").addEventListener("change", savePlayoffSettings);
-    $("scoreWeightTeam").addEventListener("change", writeScoreWeightInputs);
+    $("scoreWeightTeam").addEventListener("change", () => {
+      writeScoreWeightInputs();
+      writePositionPreferenceInputs();
+      writeFavoriteTeamInputs();
+    });
     $("saveScoreWeights").addEventListener("click", () => saveScoreWeightInputs());
     $("resetScoreWeights").addEventListener("click", resetScoreWeightInputs);
+    $("savePositionPreferences").addEventListener("click", () => savePositionPreferenceInputs());
+    $("resetPositionPreferences").addEventListener("click", resetPositionPreferenceInputs);
+    $("saveFavoriteTeams").addEventListener("click", () => saveFavoriteTeamInputs());
+    $("resetFavoriteTeams").addEventListener("click", resetFavoriteTeamInputs);
     $("rosterTeam").addEventListener("change", renderSelectedRoster);
     $("search").addEventListener("input", renderAvailable);
     $("positionFilter").addEventListener("change", renderAvailable);
